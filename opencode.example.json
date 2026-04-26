@@ -1,0 +1,15 @@
+{
+  "mcp": {
+    "everything-mew": {
+      "type": "local",
+      "command": [
+        "everything-mew"
+      ],
+      "enabled": true,
+      "environment": {
+        "EVERYTHING_SDK_DLL": "%USERPROFILE%\\.config\\opencode\\mcp-bin\\everything-sdk\\Everything64.dll"
+      },
+      "description": "Everything_Mew local Windows-only read-only MCP server. Uses SDK/IPC first, ES CLI fallback if configured, and no automatic HTTP enabling."
+    }
+  }
+}

@@ -1,0 +1,39 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build and packaging outputs
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Local-only release preparation and validation evidence
+_nonrelease/
+reports/
+*.log
+*.tmp
+*.bak
+*.backup
+opencode.backup-*.json
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+opencode.local.json
+
+# Everything SDK binaries are installed locally, not vendored
+Everything32.dll
+Everything64.dll
+es.exe
