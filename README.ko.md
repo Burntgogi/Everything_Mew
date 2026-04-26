@@ -3,7 +3,7 @@
 언어: [English](README.md) | 한국어
 
 <div align="center" aria-label="Everything_Mew 고양이 마스코트">
-  <img src="docs/assets/everything-mew-icon.png" width="220" alt="Everything_Mew: 인공지능의 검색을 돕는 작은 고양이">
+  <img src="docs/assets/everything-mew-banner.png" width="420" alt="Everything_Mew: 인공지능의 검색을 돕는 작은 고양이">
 </div>
 
 **Everything_Mew**는 [Everything](https://www.voidtools.com/)을 이용해 AI 에이전트의 검색을 빠르게 돕는 Windows 전용 읽기 전용 MCP 서버와 OpenCode 스킬입니다.
