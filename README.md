@@ -169,13 +169,9 @@ everything_search
 everything_syntax_help
 ```
 
-## Release checklist
+## Contributor notes
 
-- Keep `_nonrelease/`, caches, virtual environments, builds, SDK DLLs, and local MCP config out of Git.
-- Do not commit personal paths, local validation logs, backups, or machine-specific evidence.
-- License: Apache License 2.0. Keep copyright and license notices when redistributing.
-- Use semver release tags such as `v0.1.0`.
-
-## Trusted local paths
-
-`EVERYTHING_SDK_DLL` and `EVERYTHING_ES_EXE` are trusted local configuration knobs. Point them only at Everything SDK/ES binaries that you installed intentionally. Do not point them at downloaded or untrusted executables.
+- Do not commit SDK DLLs, `.env` files, local MCP config, caches, build outputs, or machine-specific validation logs.
+- Keep personal paths out of examples and documentation.
+- `EVERYTHING_SDK_DLL` and `EVERYTHING_ES_EXE` must point only to trusted local Everything binaries.
+- This project is licensed under Apache License 2.0.

@@ -169,13 +169,9 @@ everything_search
 everything_syntax_help
 ```
 
-## 배포 체크리스트
+## 기여자 참고
 
-- `_nonrelease/`, 캐시, 가상환경, 빌드 산출물, SDK DLL, 로컬 MCP 설정은 Git에 올리지 않습니다.
-- 개인 경로, 로컬 검증 로그, 백업, 장비별 증거를 커밋하지 않습니다.
-- 라이선스는 Apache License 2.0입니다. 재배포 시 저작권과 라이선스 고지를 유지해야 합니다.
-- `v0.1.0` 같은 semver 릴리스 태그를 사용합니다.
-
-## 신뢰할 수 있는 로컬 경로
-
-`EVERYTHING_SDK_DLL`과 `EVERYTHING_ES_EXE`는 신뢰할 수 있는 로컬 설정 값입니다. 직접 설치한 Everything SDK/ES 바이너리만 가리키세요. 다운로드했거나 신뢰할 수 없는 실행 파일을 가리키면 안 됩니다.
+- SDK DLL, `.env`, 로컬 MCP 설정, 캐시, 빌드 산출물, 장비별 검증 로그는 커밋하지 마세요.
+- 예시와 문서에 개인 경로를 넣지 마세요.
+- `EVERYTHING_SDK_DLL`과 `EVERYTHING_ES_EXE`는 신뢰할 수 있는 로컬 Everything 바이너리만 가리켜야 합니다.
+- 이 프로젝트는 Apache License 2.0으로 배포됩니다.

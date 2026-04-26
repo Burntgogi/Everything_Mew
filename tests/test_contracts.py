@@ -31,4 +31,5 @@ def test_readme_and_opencode_prefer_release_console_entrypoint() -> None:
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "Everything_Mew" in readme
     assert 'py -m pip install -e ".[server]"' in readme
-    assert "Trusted local paths" in readme
+    assert "Contributor notes" in readme
+    assert "trusted local Everything binaries" in readme
