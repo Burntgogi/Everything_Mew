@@ -3,7 +3,7 @@
 Language: English | [한국어](README.ko.md)
 
 <div align="center" aria-label="Everything_Mew cat mascot">
-  <img src="docs/assets/everything-mew-icon-with-title.svg" width="260" alt="Everything_Mew: a small cat that helps AI search">
+  <img src="docs/assets/everything-mew-icon.png" width="220" alt="Everything_Mew: a small cat that helps AI search">
 </div>
 
 **Everything_Mew** is a Windows-only, read-only MCP server and OpenCode skill that helps AI agents search faster with [Everything](https://www.voidtools.com/).
