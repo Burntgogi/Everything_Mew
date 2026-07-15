@@ -12,11 +12,23 @@ from everything_mcp.contracts import SearchHit
 from everything_mcp.errors import QueryError
 
 
-def _adapter() -> es_cli.EsCliAdapter:
-    return es_cli.EsCliAdapter(Path(r"C:\Tools\es.exe"))
+RETURN_CODE_CASES = [
+    (1, "register window class failure", "restart ES CLI and retry"),
+    (2, "listening window failure", "restart Everything and retry"),
+    (3, "out of memory", "reduce the result scope or restart Everything"),
+    (4, "missing option argument", "supply the missing option argument"),
+    (5, "export output failure", "verify the export destination permissions"),
+    (6, "unknown switch", "use a compatible es.exe version"),
+    (7, "failed IPC query", "restart Everything and retry the query"),
+    (8, "Everything IPC window not found", "start Everything and retry"),
+]
 
 
-def test_status_probes_everything_version_with_dedicated_timeout(monkeypatch: MonkeyPatch) -> None:
+def _adapter(everything_installed: bool = True) -> es_cli.EsCliAdapter:
+    return es_cli.EsCliAdapter(Path(r"C:\Tools\es.exe"), everything_installed=everything_installed)
+
+
+def test_status_probes_valid_everything_version_with_dedicated_timeout(monkeypatch: MonkeyPatch) -> None:
     calls: list[tuple[list[str], dict[str, Any]]] = []
 
     def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -25,10 +37,12 @@ def test_status_probes_everything_version_with_dedicated_timeout(monkeypatch: Mo
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    status = _adapter().status()
+    status = _adapter(everything_installed=False).status()
 
+    assert status.everything_installed is True
     assert status.everything_running is True
     assert status.backend == "es-cli"
+    assert any("1.4.1.1026" in note for note in status.notes)
     assert calls == [
         (
             [r"C:\Tools\es.exe", "-get-everything-version"],
@@ -41,6 +55,21 @@ def test_status_probes_everything_version_with_dedicated_timeout(monkeypatch: Mo
             },
         )
     ]
+
+
+@pytest.mark.parametrize("stdout", ["", "Everything 1.4.1.1026", "1.4.1", "1.4.1.1026\n2.0.0.0"])
+def test_status_rejects_empty_or_malformed_successful_version_output(monkeypatch: MonkeyPatch, stdout: str) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr=""),
+    )
+
+    status = _adapter(everything_installed=False).status()
+
+    assert status.everything_installed is False
+    assert status.everything_running is False
+    assert any("version output" in note for note in status.notes)
 
 
 def test_status_reports_stopped_everything_for_ipc_window_not_found(monkeypatch: MonkeyPatch) -> None:
@@ -97,14 +126,49 @@ def test_status_reports_execution_error_as_not_running(monkeypatch: MonkeyPatch)
     assert any("could not be executed" in note for note in status.notes)
 
 
-def test_query_failure_includes_official_return_code_note(monkeypatch: MonkeyPatch) -> None:
+@pytest.mark.parametrize(("returncode", "description", "action"), RETURN_CODE_CASES)
+def test_query_failure_includes_official_return_code_description_and_remediation(
+    monkeypatch: MonkeyPatch, returncode: int, description: str, action: str
+) -> None:
     def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        raise subprocess.CalledProcessError(7, "es.exe", stderr="runtime detail")
+        raise subprocess.CalledProcessError(returncode, "es.exe", stderr="runtime detail")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(QueryError, match="failed IPC query"):
+    with pytest.raises(QueryError) as caught:
         _adapter().count("ext:md")
+
+    assert description in str(caught.value)
+    assert action in str(caught.value)
+    assert "check syntax" not in str(caught.value)
+
+
+def test_status_reports_locale_decode_error_without_claiming_runtime(monkeypatch: MonkeyPatch) -> None:
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise UnicodeDecodeError("cp949", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    status = _adapter().status()
+
+    assert status.everything_running is False
+    assert any("active Windows locale" in note for note in status.notes)
+    assert all("invalid start byte" not in note for note in status.notes)
+
+
+def test_query_reports_locale_decode_error_without_traceback_leakage(monkeypatch: MonkeyPatch) -> None:
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise UnicodeDecodeError("cp949", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(QueryError) as caught:
+        _adapter().count("ext:md")
+
+    assert "active Windows locale" in str(caught.value)
+    assert "recorded or live ES fixture" in str(caught.value)
+    assert "invalid start byte" not in str(caught.value)
+    assert caught.value.__cause__ is None
 
 
 def test_search_permits_hard_limit_plus_one_for_truncation(monkeypatch: MonkeyPatch) -> None:
@@ -177,3 +241,34 @@ def test_metadata_uses_deterministic_switches_and_parses_recorded_korean_csv(mon
             attributes="A",
         )
     ]
+
+
+def test_metadata_empty_size_maps_to_none(monkeypatch: MonkeyPatch) -> None:
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout='"C:\\Work\\empty.txt","","2026-07-15T12:34:56Z","A"\n', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert _adapter().search("empty", metadata=True) == [
+        SearchHit(path=r"C:\Work\empty.txt", size=None, date_modified="2026-07-15T12:34:56Z", attributes="A")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        ('"C:\\Work\\short.txt","1","2026-07-15T12:34:56Z"\n', "exactly four columns"),
+        ('"C:\\Work\\extra.txt","1","2026-07-15T12:34:56Z","A","extra"\n', "exactly four columns"),
+        ('"C:\\Work\\unterminated.txt","1","2026-07-15T12:34:56Z,"A"\n', "malformed"),
+        ('"C:\\Work\\grouped.txt","1,234","2026-07-15T12:34:56Z","A"\n', "ungrouped byte integer"),
+        ('"C:\\Work\\nonnumeric.txt","many","2026-07-15T12:34:56Z","A"\n', "ungrouped byte integer"),
+    ],
+)
+def test_metadata_rejects_invalid_csv_rows(monkeypatch: MonkeyPatch, output: str, message: str) -> None:
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=output, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(QueryError, match=message):
+        _adapter().search("ext:txt", metadata=True)

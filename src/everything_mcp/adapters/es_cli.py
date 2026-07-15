@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import shutil
 import subprocess
 from io import StringIO
@@ -14,16 +15,21 @@ from everything_mcp.query import compose_query
 
 DEFAULT_ES_TIMEOUT_SECONDS = 15
 STATUS_PROBE_TIMEOUT_SECONDS = 2
+VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
+LOCALE_DECODE_ERROR_NOTE = (
+    "ES CLI output could not be decoded using the active Windows locale; verify locale configuration with a recorded "
+    "or live ES fixture before configuring an explicit encoding."
+)
 
-ES_RETURN_CODE_NOTES: dict[int, str] = {
-    1: "register window class failure",
-    2: "listening window failure",
-    3: "out of memory",
-    4: "missing option argument",
-    5: "export output failure",
-    6: "unknown switch",
-    7: "failed IPC query",
-    8: "Everything IPC window not found",
+ES_RETURN_CODE_NOTES: dict[int, tuple[str, str]] = {
+    1: ("register window class failure", "restart ES CLI and retry"),
+    2: ("listening window failure", "restart Everything and retry"),
+    3: ("out of memory", "reduce the result scope or restart Everything"),
+    4: ("missing option argument", "supply the missing option argument"),
+    5: ("export output failure", "verify the export destination permissions"),
+    6: ("unknown switch", "use a compatible es.exe version"),
+    7: ("failed IPC query", "restart Everything and retry the query"),
+    8: ("Everything IPC window not found", "start Everything and retry"),
 }
 
 SORT_ARGS: dict[str, str] = {
@@ -63,21 +69,28 @@ class EsCliAdapter:
             )
         except subprocess.TimeoutExpired:
             notes.append(f"ES CLI status probe timed out after {STATUS_PROBE_TIMEOUT_SECONDS} seconds; Everything is not confirmed running.")
+        except UnicodeError:
+            notes.append(LOCALE_DECODE_ERROR_NOTE)
         except OSError as exc:
             notes.append(f"ES CLI status probe could not be executed at {self.es_exe}: {exc}")
         else:
             if completed.returncode == 0:
-                return AdapterStatus(
-                    everything_installed=self.everything_installed,
-                    everything_running=True,
-                    backend="es-cli",
-                    es_cli_available=True,
-                    notes=tuple(notes),
+                version = _version_from_stdout(completed.stdout)
+                if version is not None:
+                    notes.append(f"Everything version {version} confirmed by ES CLI.")
+                    return AdapterStatus(
+                        everything_installed=True,
+                        everything_running=True,
+                        backend="es-cli",
+                        es_cli_available=True,
+                        notes=tuple(notes),
+                    )
+                notes.append(
+                    "ES CLI status probe returned invalid version output; expected exactly one numeric "
+                    "major.minor.revision.build version."
                 )
-            note = _return_code_note(completed.returncode)
-            if completed.returncode == 8:
-                note += "; start Everything and retry"
-            notes.append(f"ES CLI status probe failed with exit code {completed.returncode}: {note}.")
+            else:
+                notes.append(f"ES CLI status probe failed with exit code {completed.returncode}: {_return_code_note(completed.returncode)}.")
         return AdapterStatus(
             everything_installed=self.everything_installed,
             everything_running=False,
@@ -138,12 +151,11 @@ class EsCliAdapter:
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else "no stderr"
             note = _return_code_note(exc.returncode)
-            raise QueryError(
-                f"ES CLI query failed with exit code {exc.returncode} ({note}): {stderr}; "
-                "check syntax or call everything_syntax_help."
-            ) from exc
+            raise QueryError(f"ES CLI query failed with exit code {exc.returncode}: {note}. Details: {stderr}") from exc
         except subprocess.TimeoutExpired as exc:
             raise QueryError(f"ES CLI query timed out after {DEFAULT_ES_TIMEOUT_SECONDS} seconds; refine the query or check Everything runtime status.") from exc
+        except UnicodeError:
+            raise QueryError(LOCALE_DECODE_ERROR_NOTE) from None
         except OSError as exc:
             raise QueryError(f"ES CLI could not be executed at {self.es_exe}: {exc}") from exc
 
@@ -165,34 +177,47 @@ def _sort_arg(sort: SortName) -> str:
 
 
 def _return_code_note(returncode: int) -> str:
-    return ES_RETURN_CODE_NOTES.get(returncode, "unrecognized ES CLI failure")
+    description, action = ES_RETURN_CODE_NOTES.get(returncode, ("unrecognized ES CLI failure", "inspect ES CLI output and retry"))
+    return f"{description}; {action}"
+
+
+def _version_from_stdout(output: str) -> str | None:
+    versions = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(versions) != 1:
+        return None
+    version = versions[0]
+    return version if VERSION_PATTERN.fullmatch(version) else None
 
 
 def _parse_metadata_csv(output: str) -> list[SearchHit]:
-    rows = csv.reader(StringIO(output.lstrip("\ufeff")))
     hits: list[SearchHit] = []
-    for row in rows:
-        if not row:
-            continue
-        path = row[0].lstrip("\ufeff").strip()
-        if not path or path.lower() == "filename":
-            continue
-        hits.append(
-            SearchHit(
-                path=path,
-                size=_parse_int(row[1]) if len(row) > 1 else None,
-                date_modified=row[2].strip() if len(row) > 2 and row[2].strip() else None,
-                attributes=row[3].strip() if len(row) > 3 and row[3].strip() else None,
+    try:
+        rows = csv.reader(StringIO(output.lstrip("\ufeff")), strict=True)
+        for row in rows:
+            if not row:
+                continue
+            if len(row) != 4:
+                raise QueryError(f"ES CLI metadata CSV must contain exactly four columns; received {len(row)}.")
+            path = row[0].lstrip("\ufeff").strip()
+            if not path:
+                continue
+            hits.append(
+                SearchHit(
+                    path=path,
+                    size=_parse_size(row[1]),
+                    date_modified=row[2].strip() or None,
+                    attributes=row[3].strip() or None,
+                )
             )
-        )
+    except csv.Error as exc:
+        raise QueryError("ES CLI metadata CSV is malformed; retry the query or verify the local ES CLI output.") from exc
     return hits
 
 
-def _parse_int(value: str) -> int | None:
-    stripped = value.strip().replace(",", "")
+def _parse_size(value: str) -> int | None:
+    stripped = value.strip()
     if not stripped:
         return None
-    try:
-        return int(stripped)
-    except ValueError:
-        return None
+    if not stripped.isascii() or not stripped.isdecimal():
+        raise QueryError(f"ES CLI metadata size must be an ungrouped byte integer or empty; received {value!r}.")
+    return int(stripped)
