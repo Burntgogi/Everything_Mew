@@ -29,6 +29,26 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP on selected path
 
 Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 정리, 저장공간 관리를 위한 도구가 아닙니다.
 
+## 업데이트 노트
+
+### 다음 릴리스: 낮은 대기 메모리 MCP 모드
+
+이번 업데이트는 Codex Desktop처럼 활성 세션마다 서버 프로세스를 유지하는 MCP
+호스트를 위해 낮은 대기 메모리용 stdio MCP 경로를 추가합니다.
+
+- `everything-mew-lite`와 `everything-mcp-lite` 콘솔 진입점을 추가했습니다.
+- 모듈 실행을 선호하는 호스트를 위해 `python -m everything_mcp.lite_stdio`를 제공합니다.
+- lite 경로는 대기 중 FastMCP를 import하지 않고 `initialize`, `ping`, `tools/list`, `tools/call`에 응답합니다.
+- Everything SDK/IPC 백엔드는 실제 도구가 호출될 때까지 로드를 지연합니다.
+- 기존 `everything-mew`와 `everything-mcp` 진입점은 FastMCP 경로로 계속 사용할 수 있습니다.
+- 패키지 최상위 import는 FastMCP 서버 모듈을 lazy-loading하도록 바뀌었습니다.
+- lite stdio 동작, 읽기 전용 도구 메타데이터, 어댑터 선택, 광범위 쿼리 안전장치, 문법 검증에 대한 계약/안전 테스트를 보강했습니다.
+
+권장 적용 방식:
+
+- Codex Desktop 또는 항상 켜 두는 로컬 MCP 호스트에는 `everything-mew-lite`를 사용하세요.
+- FastMCP와 이미 잘 동작하거나 기존 FastMCP 런타임 동작이 필요한 호스트에는 `everything-mew`를 유지하세요.
+
 ## 요구 사항
 
 - **Windows 전용입니다.** Everything은 Windows 검색 도구입니다.
@@ -78,6 +98,27 @@ OpenCode 스타일 등록 예시:
 ```
 
 호환성을 위해 기존 명령 이름 `everything-mcp`도 유지합니다.
+
+Codex Desktop처럼 활성 세션마다 stdio MCP 프로세스를 유지하는 호스트에서는
+낮은 대기 메모리용 진입점을 우선 사용하세요.
+
+```text
+everything-mew-lite
+```
+
+`everything-mew-lite`는 작은 MCP 도구 표면을 직접 처리하며, 대기 중에는
+FastMCP를 로드하지 않습니다. Everything 백엔드는 실제 도구 호출 시점에만
+불러옵니다. editable 설치 후 콘솔 스크립트가 아직 재생성되지 않았다면 같은
+환경 변수와 함께 `python -m everything_mcp.lite_stdio`를 사용할 수 있습니다.
+
+낮은 대기 메모리 모드의 변경 사항:
+
+- `everything-mew-lite`와 `everything-mcp-lite` 콘솔 진입점을 추가했습니다.
+- 모듈 실행을 선호하는 호스트를 위해 `python -m everything_mcp.lite_stdio`를 추가했습니다.
+- 패키지 import 시 FastMCP 서버 모듈을 바로 불러오지 않도록 lazy-loading으로 바꿨습니다.
+- MCP `initialize` 응답에 읽기 전용 서버 지침을 포함합니다.
+- 백엔드를 불러오기 전에 MCP `params`와 도구 인자 타입을 검증합니다.
+- 기존 FastMCP 경로인 `everything-mew`와 `everything-mcp`는 그대로 유지합니다.
 
 ## 저장소 구성
 
@@ -159,6 +200,23 @@ everything-mew
 ```
 
 `everything-mew`는 stdio MCP 서버를 시작하고 stdin/stdout에서 MCP 프로토콜 메시지를 기다립니다. 일반 터미널에서는 중단하기 전까지 멈춘 것처럼 보일 수 있습니다. 실제 도구 호출은 MCP 클라이언트 또는 검사기를 사용하세요.
+
+낮은 대기 메모리 진입점 스모크 체크:
+
+```powershell
+everything-mew-lite
+```
+
+`everything-mew-lite`도 같은 stdin/stdout MCP 전송을 사용하지만, 대기 중에는 FastMCP를 로드하지 않습니다. `initialize`, `ping`, `tools/list`, 그리고 네 가지 읽기 전용 도구의 `tools/call`에 응답해야 합니다.
+
+권장 릴리스 검증:
+
+```powershell
+py -m pytest -q
+py -m ruff check .
+py -m mypy src tests
+py -m pip wheel . --no-deps -w .\dist-check
+```
 
 예상 도구 목록:
 

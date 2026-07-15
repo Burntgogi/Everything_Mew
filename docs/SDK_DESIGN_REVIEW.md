@@ -1,128 +1,159 @@
 # Everything SDK Design Review
 
-## Summary
+Review date: 2026-07-15
 
-The current Skill/MCP design is correctly SDK-centered. `es.exe` is optional fallback only; it is not required when SDK/IPC is healthy.
+## Executive Finding
 
-Official SDK docs confirm the SDK provides a DLL/Lib interface over IPC, requires the Everything client running in the background, and exposes direct APIs for search, counts, sort, request flags, and metadata.
+The project should keep its current backend strategy:
 
-## Current Strengths
+1. Everything SDK/IPC as the primary backend;
+2. ES CLI as an optional fallback;
+3. direct stdio as the default low-standby MCP transport;
+4. FastMCP as a compatibility entrypoint;
+5. no automatically enabled HTTP server or FastAPI service.
 
-- SDK/IPC is the primary backend.
-- ES CLI remains fallback only.
-- HTTP is deferred and not auto-enabled.
-- MCP exposes only read-only tools:
-  - `everything_status`
-  - `everything_count`
-  - `everything_search`
-  - `everything_syntax_help`
-- Search output defaults to path-first.
-- Metadata is opt-in.
-- Broad/root searches are guarded.
-- Scope composition uses `path:"..."` style quoting.
-- SDK adapter already uses:
-  - `Everything_SetSearchW`
-  - `Everything_SetSort`
-  - `Everything_SetRequestFlags`
-  - `Everything_SetMax`
-  - `Everything_QueryW`
-  - `Everything_GetTotResults`
-  - `Everything_GetNumResults`
-  - `Everything_GetResultFullPathNameW`
-  - `Everything_GetResultSize`
-  - `Everything_GetResultDateModified`
-  - `Everything_GetResultAttributes`
+The architecture is appropriate, but the current implementation has a release-blocking
+SDK sort defect and incomplete readiness/result diagnostics.
 
-## SDK-Driven Gaps to Consider
+## Confirmed SDK Properties
+
+The official SDK documentation confirms that:
+
+- the SDK is a DLL/Lib wrapper over Everything IPC;
+- the Everything client must be running in the background;
+- the SDK supports Unicode, blocking and nonblocking queries, and is thread safe;
+- a nonblocking query requires a reply window and reply-message handling;
+- `Everything_IsDBLoaded` is needed to distinguish a ready database from a running
+  client that is still loading;
+- `Everything_Reset` frees the current search/result state;
+- `Everything_CleanUp` should be the final SDK call;
+- the actual sort and available result fields can differ from those requested.
+
+These properties support the current synchronous SDK adapter. They do not justify a
+FastAPI layer, a global SDK lock, or a nonblocking Windows message-loop rewrite.
+
+## Release-Blocking Defect
+
+`src/everything_mcp/adapters/sdk_ipc.py` currently maps:
+
+```text
+date_modified -> 11
+```
+
+The official `Everything_SetSort` table defines:
+
+```text
+11 = EVERYTHING_SORT_DATE_CREATED_ASCENDING
+13 = EVERYTHING_SORT_DATE_MODIFIED_ASCENDING
+```
+
+A live SDK query confirmed that requesting the public `date_modified` sort currently
+produces actual result-list sort value `11`. The adapter therefore returns creation-date
+ordering under a date-modified label.
+
+Required correction:
+
+- map `date_modified` to `13`;
+- replace numeric literals with named SDK constants;
+- unit-test the complete public sort mapping;
+- integration-test `Everything_GetResultListSort() == 13` on a controlled fixture with
+  date-modified fast sort enabled, plus the documented fallback-note path.
+
+## Required SDK Improvements
 
 ### 1. Database readiness
 
-Official SDK docs expose `Everything_IsDBLoaded`. The current status check confirms SDK runtime/version availability, but does not explicitly report database-loaded state.
+The current status check uses `Everything_GetMajorVersion` to infer that IPC is running.
+That does not prove the database is loaded. Official documentation warns that queries
+while loading can appear to return no results.
 
-Recommended enhancement:
+Add:
 
-- Add `dbLoaded` to `everything_status` output.
-- If DB is not loaded, return actionable note: wait for Everything indexing to finish.
+- `dbLoaded` to status output;
+- a distinct running-but-loading state/note;
+- query rejection with an actionable retry message while loading.
 
-### 2. Version and target-machine reporting
+### 2. Version and target diagnostics
 
-Official APIs include version getters and `Everything_GetTargetMachine`.
+Bind the complete version getters and `Everything_GetTargetMachine`. Add optional status
+fields for:
 
-Recommended enhancement:
+- `version`;
+- `targetMachine`;
+- `sdkDll` for local diagnostics.
 
-- Add optional status fields:
-  - `version`
-  - `targetMachine`
-  - `sdkDll`
+These fields make IPC, version, and x86/x64 failures diagnosable without increasing
+normal search payloads.
 
-This helps diagnose x86/x64 and runtime mismatch issues.
+### 3. Deterministic SDK state cleanup
 
-### 3. Result-list verification
+Use `Everything_Reset` after copying count/results into Python values. The reset should
+run in `finally` so both successful and failed result processing release current SDK
+search/result allocations and restore default state.
 
-Official SDK provides `Everything_GetResultListSort` and `Everything_GetResultListRequestFlags`.
+Do not call `Everything_CleanUp` after each query. The documentation defines it as the
+last SDK call. Add it only if the implementation later introduces one explicit
+process-lifetime SDK owner and a final shutdown hook.
 
-Recommended enhancement:
+### 4. Actual result verification
 
-- After query, verify actual sort/request flags.
-- If requested metadata was not available, add `notes` or omit unavailable fields explicitly.
+After each successful query:
 
-### 4. File/folder counts
+- call `Everything_GetResultListSort` and compare it with the requested sort;
+- call `Everything_GetResultListRequestFlags` and compare it with requested fields;
+- return a concise note when a sort falls back or metadata is unavailable;
+- omit unavailable metadata instead of implying that it was returned.
 
-Official SDK exposes file/folder count APIs, but docs note some are unsupported when request flags are used.
+This requires a small adapter result envelope, such as a typed search batch containing
+items, actual sort, available metadata, and notes.
 
-Recommended enhancement:
+### 5. Count and pagination
 
-- Keep `everything_count` simple with total count for MVP.
-- Add optional future fields only after testing with and without request flags:
-  - `fileCount`
-  - `folderCount`
+Keep `everything_count` total-only for the current release. File/folder subtotals and
+`Everything_SetOffset` pagination should remain deferred until a concrete client use
+case and live SDK tests require them.
 
-### 5. Offset/pagination
+## ES Fallback Implications
 
-SDK supports `Everything_SetOffset`.
+The SDK review does not remove the need for ES fallback hardening:
 
-Recommended enhancement:
+- probe the running Everything client instead of treating an existing `es.exe` as ready;
+- allow the internal 101st result used to detect truncation at the public limit of 100;
+- specify ascending direction because ES defaults size/date sorts to descending while
+  the SDK contract currently uses ascending sorts;
+- request deterministic byte size, UTC ISO date, no-header, and no-grouping output;
+- verify non-ASCII path decoding with an integration fixture.
 
-- Add `offset` input to `everything_search` only if paging becomes necessary.
-- Maintain hard cap per page.
+## Confirmed Non-Goals
 
-### 6. Date handling
+- Do not add FastAPI or automatically enable Everything HTTP.
+- Do not replace blocking SDK queries without a reproducible hang requirement.
+- Do not add a global SDK lock while the official SDK is documented as thread safe.
+- Do not expand metadata or pagination merely because the SDK exposes more functions.
+- Do not add file mutation or index-management tools.
 
-Unknown dates can be returned as sentinel values.
+## Final Priority
 
-Recommended enhancement:
+1. Correct the `date_modified` SDK sort constant.
+2. Enforce lite MCP lifecycle and advertised schemas.
+3. Close broad-query and ES fallback correctness gaps.
+4. Add database readiness, SDK reset, and actual-result verification.
+5. Add version/target diagnostics, CI, integration tests, and release evidence.
 
-- Guard against `0xFFFFFFFFFFFFFFFF` before converting FILETIME.
+The low-standby direct stdio design remains the correct product direction. Release
+readiness depends on correctness and reproducibility work, not another architecture
+change.
 
-### 7. More metadata fields
+## Official References
 
-Official SDK offers more result fields than MVP exposes.
-
-Possible future metadata fields:
-
-- extension
-- dateCreated
-- dateAccessed
-- folder/file result type
-- highlighted path/file name
-
-Keep MVP minimal unless a scenario needs these fields.
-
-## Skill Design Recommendations
-
-Add a short SDK readiness section to the skill:
-
-- If `everything_status.backend != "sdk-ipc"`, explain that SDK DLL or Everything runtime is missing.
-- If DB is not loaded, wait or ask user to open Everything.
-- Use `metadata=true` only when size/date/attributes are needed.
-- Never use Everything for cleanup; only return candidate paths/groups.
-
-## Conclusion
-
-The MCP is aligned with official SDK architecture. The next useful improvements are diagnostics-oriented rather than feature-heavy:
-
-1. expose DB-loaded state;
-2. expose SDK version/target machine;
-3. verify actual request flags/sort;
-4. guard unknown FILETIME values;
-5. document SDK installation and restart requirements for agents.
+- [Everything SDK overview](https://www.voidtools.com/support/everything/sdk/)
+- [Everything_Query](https://www.voidtools.com/support/everything/sdk/everything_query/)
+- [Everything_SetSort](https://www.voidtools.com/support/everything/sdk/everything_setsort/)
+- [Everything_IsDBLoaded](https://www.voidtools.com/support/everything/sdk/everything_isdbloaded/)
+- [Everything_Reset](https://www.voidtools.com/support/everything/sdk/everything_reset/)
+- [Everything_CleanUp](https://www.voidtools.com/support/everything/sdk/everything_cleanup/)
+- [Everything_SetRequestFlags](https://www.voidtools.com/support/everything/sdk/everything_setrequestflags/)
+- [Everything_GetResultListSort](https://www.voidtools.com/support/everything/sdk/everything_getresultlistsort/)
+- [Everything_GetResultListRequestFlags](https://www.voidtools.com/support/everything/sdk/everything_getresultlistrequestflags/)
+- [Everything_GetTargetMachine](https://www.voidtools.com/support/everything/sdk/everything_gettargetmachine/)
+- [ES command-line interface](https://www.voidtools.com/support/everything/command_line_interface/)

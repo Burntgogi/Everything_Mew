@@ -1,4 +1,5 @@
 from importlib import import_module
+from typing import Any
 
 contracts = import_module("everything_mcp.contracts")
 server = import_module("everything_mcp.server")
@@ -11,10 +12,17 @@ class SearchAdapter:
         self.hits = hits
         self.calls: list[dict[str, object]] = []
 
-    def status(self):
+    def status(self) -> Any:
         return contracts.AdapterStatus(True, True, "sdk-ipc", False)
 
-    def search(self, query: str, scope: str | None = None, limit: int = 25, sort: str = "name", metadata: bool = False):
+    def search(
+        self,
+        query: str,
+        scope: str | None = None,
+        limit: int = 25,
+        sort: str = "name",
+        metadata: bool = False,
+    ) -> list[object]:
         self.calls.append({"query": query, "scope": scope, "limit": limit, "sort": sort, "metadata": metadata})
         return self.hits[:limit]
 

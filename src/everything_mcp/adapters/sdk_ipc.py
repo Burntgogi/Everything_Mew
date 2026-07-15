@@ -42,7 +42,7 @@ class SdkIpcAdapter:
 
     def __init__(self, config: EverythingConfig | None = None) -> None:
         self.config = config or EverythingConfig.from_env()
-        self._dll = None
+        self._dll: Any | None = None
         self._load_error: str | None = None
         self._load_dll()
 

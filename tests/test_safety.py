@@ -1,11 +1,23 @@
 from importlib import import_module
 import subprocess
 from pathlib import Path
+from typing import Any, TypedDict
+
+from pytest import MonkeyPatch
 
 es_cli = import_module("everything_mcp.adapters.es_cli")
 sdk_ipc = import_module("everything_mcp.adapters.sdk_ipc")
 config_module = import_module("everything_mcp.config")
 errors = import_module("everything_mcp.errors")
+
+
+class SubprocessRunCall(TypedDict):
+    args: list[str]
+    check: bool
+    capture_output: bool
+    text: bool
+    shell: bool
+    timeout: float
 
 
 def test_sdk_adapter_missing_dll_reports_status_without_crashing(tmp_path: Path) -> None:
@@ -18,10 +30,17 @@ def test_sdk_adapter_missing_dll_reports_status_without_crashing(tmp_path: Path)
     assert any("DLL" in note for note in status.notes)
 
 
-def test_es_cli_uses_subprocess_without_shell(monkeypatch) -> None:
-    calls = []
+def test_es_cli_uses_subprocess_without_shell(monkeypatch: MonkeyPatch) -> None:
+    calls: list[SubprocessRunCall] = []
 
-    def fake_run(args, check, capture_output, text, shell, timeout):
+    def fake_run(
+        args: list[str],
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        shell: bool,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
         calls.append({"args": args, "check": check, "capture_output": capture_output, "text": text, "shell": shell, "timeout": timeout})
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="3\n", stderr="")
 
@@ -35,7 +54,7 @@ def test_es_cli_uses_subprocess_without_shell(monkeypatch) -> None:
     assert calls[0]["args"][-1] == 'path:"C:\\Work" ext:md'
 
 
-def test_es_cli_bad_count_raises_actionable_query_error(monkeypatch) -> None:
+def test_es_cli_bad_count_raises_actionable_query_error(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(
         subprocess,
         "run",
@@ -71,8 +90,8 @@ def test_es_cli_rejects_unknown_sort() -> None:
         raise AssertionError("Expected QueryError for unsupported ES sort")
 
 
-def test_es_cli_timeout_raises_query_error(monkeypatch) -> None:
-    def fake_run(*args, **kwargs):
+def test_es_cli_timeout_raises_query_error(monkeypatch: MonkeyPatch) -> None:
+    def fake_run(*args: object, **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd="es.exe", timeout=kwargs["timeout"])
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -129,7 +148,7 @@ def test_sdk_date_modified_ignores_unknown_and_out_of_range_filetime() -> None:
         def __init__(self, raw_value: int) -> None:
             self.raw_value = raw_value
 
-        def Everything_GetResultDateModified(self, index, value_pointer):
+        def Everything_GetResultDateModified(self, index: int, value_pointer: Any) -> bool:
             value_pointer._obj.value = self.raw_value
             return True
 

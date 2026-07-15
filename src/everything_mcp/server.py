@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from importlib import import_module
 from typing import Any
 
 from .adapters import EverythingAdapter, select_adapter
-from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, AdapterStatus, SortName, clamp_limit, path_first_items
+from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, SortName, clamp_limit, path_first_items
 from .errors import BackendUnavailableError, EverythingMcpError
 from .query import has_path_signal, has_strong_filter, is_drive_root
 from .syntax import syntax_help

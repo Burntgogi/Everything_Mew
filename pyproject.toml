@@ -25,6 +25,8 @@ dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 [project.scripts]
 everything-mew = "everything_mcp.__main__:main"
 everything-mcp = "everything_mcp.__main__:main"
+everything-mew-lite = "everything_mcp.lite_stdio:main"
+everything-mcp-lite = "everything_mcp.lite_stdio:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/everything_mcp"]

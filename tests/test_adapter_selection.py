@@ -1,5 +1,8 @@
 from importlib import import_module
 from pathlib import Path
+from typing import Any
+
+from pytest import MonkeyPatch
 
 selection = import_module("everything_mcp.adapters.selection")
 config_module = import_module("everything_mcp.config")
@@ -9,14 +12,14 @@ contracts = import_module("everything_mcp.contracts")
 class FakeSdkAdapter:
     name = "sdk-ipc"
 
-    def __init__(self, config) -> None:
+    def __init__(self, config: Any) -> None:
         self.config = config
 
-    def status(self):
+    def status(self) -> Any:
         return contracts.AdapterStatus(True, True, "sdk-ipc", False, notes=("sdk ready",))
 
 
-def test_select_adapter_prefers_ready_sdk(monkeypatch) -> None:
+def test_select_adapter_prefers_ready_sdk(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr("everything_mcp.adapters.selection.SdkIpcAdapter", FakeSdkAdapter)
     monkeypatch.setattr("everything_mcp.adapters.selection.find_es_cli", lambda configured=None: Path(r"C:\Tools\es.exe"))
 
@@ -25,9 +28,9 @@ def test_select_adapter_prefers_ready_sdk(monkeypatch) -> None:
     assert adapter.name == "sdk-ipc"
 
 
-def test_select_adapter_uses_es_cli_when_sdk_unavailable(monkeypatch) -> None:
+def test_select_adapter_uses_es_cli_when_sdk_unavailable(monkeypatch: MonkeyPatch) -> None:
     class UnavailableSdk(FakeSdkAdapter):
-        def status(self):
+        def status(self) -> Any:
             return contracts.AdapterStatus(False, False, "none", False, notes=("sdk unavailable",))
 
     monkeypatch.setattr("everything_mcp.adapters.selection.SdkIpcAdapter", UnavailableSdk)
@@ -39,9 +42,9 @@ def test_select_adapter_uses_es_cli_when_sdk_unavailable(monkeypatch) -> None:
     assert adapter.status().backend == "es-cli"
 
 
-def test_select_adapter_returns_actionable_null_when_no_backend(monkeypatch) -> None:
+def test_select_adapter_returns_actionable_null_when_no_backend(monkeypatch: MonkeyPatch) -> None:
     class UnavailableSdk(FakeSdkAdapter):
-        def status(self):
+        def status(self) -> Any:
             return contracts.AdapterStatus(False, False, "none", False, notes=("sdk unavailable",))
 
     monkeypatch.setattr("everything_mcp.adapters.selection.SdkIpcAdapter", UnavailableSdk)

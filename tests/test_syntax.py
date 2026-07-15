@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from importlib import import_module
 
 server = import_module("everything_mcp.server")
@@ -22,15 +23,15 @@ def test_mcp_wrappers_do_not_expose_adapter_parameter() -> None:
 
 
 def test_register_tool_does_not_fallback_to_internal_function_name() -> None:
-    calls = []
+    calls: list[dict[str, object]] = []
 
     class FakeMcp:
-        def tool(self, **kwargs):
+        def tool(self, **kwargs: object) -> Callable[[Callable[..., object]], Callable[..., object]]:
             calls.append(kwargs)
             if "annotations" in kwargs:
                 raise TypeError("old FastMCP without annotations")
 
-            def decorator(func):
+            def decorator(func: Callable[..., object]) -> Callable[..., object]:
                 return func
 
             return decorator

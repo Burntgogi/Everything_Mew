@@ -1,4 +1,5 @@
 from importlib import import_module
+from typing import Any
 
 contracts = import_module("everything_mcp.contracts")
 server = import_module("everything_mcp.server")
@@ -7,7 +8,7 @@ server = import_module("everything_mcp.server")
 class StatusAdapter:
     name = "fake"
 
-    def status(self):
+    def status(self) -> Any:
         return contracts.AdapterStatus(
             everything_installed=True,
             everything_running=True,

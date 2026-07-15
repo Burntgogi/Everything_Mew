@@ -12,6 +12,7 @@ Everything_Mew is Windows-only and SDK-first. The primary backend uses the offic
 - Do not mutate Everything indexes or configuration.
 - Do not enable Everything HTTP automatically.
 - Do not overwrite global MCP/OpenCode config without a backup and explicit user confirmation.
+- For Codex Desktop, prefer the low-standby `everything-mew-lite` entrypoint or `python -m everything_mcp.lite_stdio` when the server will remain enabled across many sessions.
 - Do not commit SDK DLLs, local config, backups, or machine-specific validation logs.
 
 ## Requirements
@@ -60,7 +61,7 @@ py -m pip install -e ".[server]"
 Verify entrypoints:
 
 ```powershell
-py -c "import shutil; print(shutil.which('everything-mew')); print(shutil.which('everything-mcp'))"
+py -c "import shutil; print(shutil.which('everything-mew')); print(shutil.which('everything-mcp')); print(shutil.which('everything-mew-lite'))"
 ```
 
 ### 3. Install the OpenCode skill
@@ -111,6 +112,24 @@ Add or update the MCP block. Preserve existing MCP entries.
   }
 }
 ```
+
+For Codex Desktop low-standby mode, use the lite entrypoint instead:
+
+```toml
+[mcp_servers.everything-mew]
+command = "C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python311\\python.exe"
+args = ["-m", "everything_mcp.lite_stdio"]
+enabled = true
+startup_timeout_sec = 20
+tool_timeout_sec = 20
+enabled_tools = ["everything_status", "everything_count", "everything_search", "everything_syntax_help"]
+
+[mcp_servers.everything-mew.env]
+EVERYTHING_SDK_DLL = "C:\\Users\\<you>\\.config\\opencode\\mcp-bin\\everything-sdk\\Everything64.dll"
+```
+
+This keeps the MCP tools available while avoiding the FastMCP runtime in idle
+Codex sessions.
 
 ### 6. Restart or reload the MCP host
 

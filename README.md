@@ -29,6 +29,26 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP on selected path
 
 Everything_Mew is for candidate discovery, not code understanding, duplicate cleanup, or storage management.
 
+## Update notes
+
+### Next release: low-standby MCP mode
+
+This update adds a low-standby stdio MCP path for Codex Desktop and other MCP
+hosts that keep one server process alive per active session.
+
+- `everything-mew-lite` and `everything-mcp-lite` are new console entrypoints.
+- `python -m everything_mcp.lite_stdio` is available for hosts that prefer module-based commands.
+- The lite path answers `initialize`, `ping`, `tools/list`, and `tools/call` without importing FastMCP while idle.
+- Everything SDK/IPC backend loading is deferred until a tool is actually called.
+- Existing `everything-mew` and `everything-mcp` entrypoints remain available for the FastMCP path.
+- The package top-level import now lazy-loads the FastMCP server module.
+- Contract and safety tests were expanded around lite stdio behavior, read-only tool metadata, adapter selection, broad-query safety, and syntax validation.
+
+Recommended adoption:
+
+- Use `everything-mew-lite` for Codex Desktop or always-enabled local MCP hosts.
+- Keep `everything-mew` for hosts that already work well with FastMCP or require the existing FastMCP runtime behavior.
+
 ## Requirements
 
 - **Windows only.** Everything is a Windows search tool.
@@ -78,6 +98,27 @@ Example OpenCode-style registration:
 ```
 
 The legacy command name `everything-mcp` is also kept for compatibility.
+
+For Codex Desktop or other hosts that keep one stdio MCP process alive per
+active session, prefer the low-standby entrypoint:
+
+```text
+everything-mew-lite
+```
+
+`everything-mew-lite` implements the small MCP tool surface directly and avoids
+loading FastMCP while idle. It imports the Everything backend only when a tool is
+called. If the console script has not been regenerated after an editable install,
+use `python -m everything_mcp.lite_stdio` with the same environment variables.
+
+Low-standby mode changes:
+
+- adds `everything-mew-lite` and `everything-mcp-lite` console entrypoints;
+- adds `python -m everything_mcp.lite_stdio` for hosts that prefer module-based commands;
+- keeps package import lightweight by lazy-loading the FastMCP server module;
+- advertises read-only MCP instructions during `initialize`;
+- validates MCP `params` and tool argument types before loading the backend;
+- keeps `everything-mew` and `everything-mcp` unchanged for the existing FastMCP path.
 
 ## Repository contents
 
@@ -159,6 +200,23 @@ everything-mew
 ```
 
 `everything-mew` starts a stdio MCP server and waits for MCP protocol messages on stdin/stdout. In a normal terminal it may appear idle until interrupted. Use an MCP client or inspector for real tool calls.
+
+Smoke-check the low-standby entrypoint:
+
+```powershell
+everything-mew-lite
+```
+
+`everything-mew-lite` uses the same stdin/stdout MCP transport, but it does not load FastMCP while idle. It should answer `initialize`, `ping`, `tools/list`, and `tools/call` for the four read-only tools.
+
+Recommended release checks:
+
+```powershell
+py -m pytest -q
+py -m ruff check .
+py -m mypy src tests
+py -m pip wheel . --no-deps -w .\dist-check
+```
 
 Expected tool set:
 

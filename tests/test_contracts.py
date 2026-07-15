@@ -28,6 +28,9 @@ def test_readme_and_opencode_prefer_release_console_entrypoint() -> None:
     root = Path(__file__).resolve().parents[1]
 
     assert '"everything-mew"' in (root / "opencode.example.json").read_text(encoding="utf-8")
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'everything-mew = "everything_mcp.__main__:main"' in pyproject
+    assert 'everything-mew-lite = "everything_mcp.lite_stdio:main"' in pyproject
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "Everything_Mew" in readme
     assert 'py -m pip install -e ".[server]"' in readme

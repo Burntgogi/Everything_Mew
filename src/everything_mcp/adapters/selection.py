@@ -11,6 +11,7 @@ from everything_mcp.config import EverythingConfig
 from everything_mcp.contracts import AdapterStatus, SearchHit, SortName
 from everything_mcp.errors import BackendUnavailableError
 
+from .base import EverythingAdapter
 from .es_cli import EsCliAdapter, find_es_cli
 from .sdk_ipc import SdkIpcAdapter
 
@@ -46,7 +47,7 @@ class NullAdapter:
         raise BackendUnavailableError("No Everything backend is available. Start Everything and configure SDK DLL or es.exe.")
 
 
-def select_adapter(config: EverythingConfig | None = None):
+def select_adapter(config: EverythingConfig | None = None) -> EverythingAdapter:
     cfg = config or EverythingConfig.from_env()
     everything_installed = Path(cfg.everything_exe).exists()
 
