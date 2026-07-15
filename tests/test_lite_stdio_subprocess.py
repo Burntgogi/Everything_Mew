@@ -800,6 +800,7 @@ def test_probe_topology_requires_repeated_post_exit_reconciliation_and_rooted_ro
     probe_source = measurement_function_source("Invoke-PythonProbe")
     sync_source = measurement_function_source("Sync-OwnedDescendants")
     register_source = measurement_function_source("Register-OwnedProcess")
+    capture_source = measurement_function_source("Capture-ProbeOwnershipTopology")
     discovery_source = measurement_function_source("Complete-ProbeDiscovery")
     summary_source = measurement_function_source("New-MarkdownSummary")
 
@@ -808,8 +809,9 @@ def test_probe_topology_requires_repeated_post_exit_reconciliation_and_rooted_ro
     assert "IncludeExitedParents" not in source
     assert "-ParentRecord $parent" in sync_source
     assert "parentStartTimeUtcTicks" in register_source
+    assert "Sync-OwnedDescendants" in capture_source
     assert "while (" in discovery_source
-    assert "Sync-OwnedDescendants" in discovery_source
+    assert "Sync-OwnedDescendants" not in discovery_source
     assert "postExitReconciliationPasses" in discovery_source
     assert "stablePassesRequired" in discovery_source
     assert "probeLifecycle.topology.criterion" in summary_source
@@ -1075,6 +1077,27 @@ $result = Complete-ProbeDiscovery -Session $session -OwnedRegistry $registry `
     }
 
 
+def test_probe_holds_runtime_until_expected_exact_topology_is_captured() -> None:
+    probe_source = measurement_function_source("Invoke-PythonProbe")
+    capture_source = measurement_function_source("Capture-ProbeOwnershipTopology")
+    reconciliation_source = measurement_function_source("Complete-ProbeDiscovery")
+    close_source = measurement_function_source("Close-ProbeResources")
+
+    marker_index = probe_source.index("ReadLineAsync")
+    capture_index = probe_source.index("Capture-ProbeOwnershipTopology", marker_index)
+    release_index = probe_source.index("StandardInput.WriteLine", capture_index)
+    reconciliation_index = probe_source.index("Complete-ProbeDiscovery", release_index)
+
+    assert "RedirectStandardInput = $true" in probe_source
+    assert marker_index < capture_index < release_index < reconciliation_index
+    assert "Sync-OwnedDescendants" in capture_source
+    assert "ExpectedRuntimeChild" in capture_source
+    assert "Get-OwnedProcessState" in capture_source
+    assert "Sync-OwnedDescendants" not in reconciliation_source
+    assert "StandardInput" in close_source
+    assert "time.sleep" not in MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+
+
 def test_probe_establishes_cleanup_ownership_immediately_after_start() -> None:
     probe_source = measurement_function_source("Invoke-PythonProbe")
     retained_cleanup_source = measurement_function_source("Stop-RetainedProcessHandle")
@@ -1182,9 +1205,10 @@ function Stop-ExactOwnedProcessTree {
 
 $script:originalClose = ${function:Close-ProbeResources}
 function Close-ProbeResources {
-    param($Process, $StdoutTask, $StderrTask, $OwnedRecords)
+    param($Process, $StdoutLineTask, $StdoutTask, $StderrTask, $OwnedRecords)
     $script:closeAttempted = $true
-    return & $script:originalClose -Process $Process -StdoutTask $StdoutTask `
+    return & $script:originalClose -Process $Process -StdoutLineTask $StdoutLineTask `
+        -StdoutTask $StdoutTask `
         -StderrTask $StderrTask -OwnedRecords $OwnedRecords
 }
 

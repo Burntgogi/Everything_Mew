@@ -1114,6 +1114,74 @@ function Resolve-ExistingPath {
     return (Resolve-Path -LiteralPath $Path).Path
 }
 
+function Capture-ProbeOwnershipTopology {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry,
+        [Parameter(Mandatory = $true)]
+        [DateTime]$DeadlineUtc,
+        [Parameter(Mandatory = $true)]
+        [bool]$ExpectedRuntimeChild,
+        [ValidateRange(10, 1000)]
+        [int]$PollMilliseconds = 25
+    )
+
+    $ownershipDiscoveryPasses = 0
+    while ((Get-RemainingMilliseconds -Deadline $DeadlineUtc) -gt 0) {
+        $launcherRecords = @(
+            $Session.OwnedProcesses | Where-Object {
+                $_.owned -eq $true -and $_.roles -contains "launcher"
+            }
+        )
+        if ($launcherRecords.Count -ne 1) {
+            throw "Probe ownership capture requires exactly one retained launcher."
+        }
+        $launcherState = Get-OwnedProcessState -Record $launcherRecords[0]
+        if ($launcherState.status -ne "alive-owned") {
+            throw "Probe launcher exited before expected topology was captured."
+        }
+        $null = @(
+            Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry -DeadlineUtc $DeadlineUtc
+        )
+        $ownershipDiscoveryPasses += 1
+
+        $observations = @($Session.OwnedProcesses | Where-Object { $_.owned -ne $true })
+        if ($observations.Count -gt 0) {
+            throw "Probe ownership capture produced unverifiable process observations."
+        }
+        $pythonDescendants = @(
+            $Session.OwnedProcesses | Where-Object {
+                $_.owned -eq $true -and $_.roles -notcontains "launcher" -and
+                ($_.imageName -ieq "python.exe" -or $_.imageName -ieq "pythonw.exe")
+            }
+        )
+        $shapeCaptured = if ($ExpectedRuntimeChild) {
+            $pythonDescendants.Count -eq 1
+        }
+        else {
+            $pythonDescendants.Count -eq 0
+        }
+        if ($shapeCaptured) {
+            return [pscustomobject]@{
+                pass = $true
+                expectedRuntimeChild = $ExpectedRuntimeChild
+                ownershipDiscoveryPasses = $ownershipDiscoveryPasses
+            }
+        }
+        if ($pythonDescendants.Count -gt 1 -or (-not $ExpectedRuntimeChild -and $pythonDescendants.Count -gt 0)) {
+            throw "Probe ownership capture found a runtime topology that did not match its marker."
+        }
+        $remainingMilliseconds = Get-RemainingMilliseconds -Deadline $DeadlineUtc
+        if ($remainingMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds ([Math]::Min($PollMilliseconds, $remainingMilliseconds))
+        }
+    }
+    throw "Probe expected topology was not captured while its exact launcher was alive-owned."
+}
+
 function Complete-ProbeDiscovery {
     param(
         [Parameter(Mandatory = $true)]
@@ -1123,6 +1191,8 @@ function Complete-ProbeDiscovery {
         [System.Collections.ArrayList]$OwnedRegistry,
         [Parameter(Mandatory = $true)]
         [DateTime]$DeadlineUtc,
+        [ValidateRange(0, 1000)]
+        [int]$OwnershipDiscoveryPasses = 0,
         [ValidateRange(2, 10)]
         [int]$StablePassesRequired = 2,
         [ValidateRange(10, 1000)]
@@ -1131,7 +1201,6 @@ function Complete-ProbeDiscovery {
 
     $rootExitObserved = $false
     $discoveryScanCount = 0
-    $ownershipDiscoveryPasses = 0
     $postExitDiscoveryPasses = 0
     $postExitReconciliationPasses = 0
     $stablePassesObserved = 0
@@ -1147,14 +1216,6 @@ function Complete-ProbeDiscovery {
             throw "Probe discovery lost its exact launcher record."
         }
         $launcherState = Get-OwnedProcessState -Record $launcherRecord
-        if ($launcherState.status -eq "alive-owned") {
-            $null = @(
-                Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry `
-                    -DeadlineUtc $DeadlineUtc
-            )
-            $ownershipDiscoveryPasses += 1
-            $launcherState = Get-OwnedProcessState -Record $launcherRecord
-        }
         if ($launcherState.status -eq "exited") {
             $rootExitObserved = $true
         }
@@ -1335,6 +1396,7 @@ function Get-ProbeTopologyEvidence {
 function Close-ProbeResources {
     param(
         [object]$Process = $null,
+        [object]$StdoutLineTask = $null,
         [object]$StdoutTask = $null,
         [object]$StderrTask = $null,
         [AllowEmptyCollection()]
@@ -1343,7 +1405,7 @@ function Close-ProbeResources {
 
     $issues = New-Object System.Collections.ArrayList
     if ($null -ne $Process) {
-        foreach ($streamName in @("StandardOutput", "StandardError")) {
+        foreach ($streamName in @("StandardInput", "StandardOutput", "StandardError")) {
             try {
                 if ($null -ne $Process.PSObject.Properties[$streamName] -and $null -ne $Process.$streamName) {
                     $Process.$streamName.Dispose()
@@ -1355,6 +1417,7 @@ function Close-ProbeResources {
         }
     }
     foreach ($taskEntry in @(
+            [pscustomobject]@{ name = "stdout line task"; value = $StdoutLineTask },
             [pscustomobject]@{ name = "stdout task"; value = $StdoutTask },
             [pscustomobject]@{ name = "stderr task"; value = $StderrTask }
         )) {
@@ -1426,6 +1489,7 @@ function Invoke-PythonProbe {
     $process = $null
     $processStarted = $false
     $localOwnershipEstablished = $false
+    $stdoutLineTask = $null
     $stdoutTask = $null
     $stderrTask = $null
     $probeSession = $null
@@ -1446,6 +1510,7 @@ function Invoke-PythonProbe {
         $startInfo.Arguments = '-c "{0}"' -f $Code
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
 
@@ -1463,7 +1528,7 @@ function Invoke-PythonProbe {
         $null = Register-OwnedProcess -Session $probeSession -Process $process -Role "launcher" `
             -Depth 0 -ImageName ([IO.Path]::GetFileName($Executable)) `
             -OwnedRegistry $probeOwnedRecords
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stdoutLineTask = $process.StandardOutput.ReadLineAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         $fiveSecondDiscoveryDeadline = [DateTime]::UtcNow.AddSeconds(5)
@@ -1473,26 +1538,41 @@ function Invoke-PythonProbe {
         else {
             $deadline
         }
+        if (-not (Wait-TaskUntilDeadline -Task $stdoutLineTask -Deadline $discoveryDeadline)) {
+            throw "$FailureMessage The interpreter probe topology marker timed out."
+        }
+        $stdout = ([string]$stdoutLineTask.Result).Trim()
+        $probeParts = $stdout -split '\|', 3
+        if ($probeParts.Count -ne 3 -or ($probeParts[2] -ne "0" -and $probeParts[2] -ne "1")) {
+            throw "$FailureMessage Interpreter probe output omitted the runtime-topology marker."
+        }
+        $expectedRuntimeChild = $probeParts[2] -eq "1"
+        $probeCapture = Capture-ProbeOwnershipTopology -Session $probeSession `
+            -OwnedRegistry $probeOwnedRecords -DeadlineUtc $discoveryDeadline `
+            -ExpectedRuntimeChild $expectedRuntimeChild
+        $process.StandardInput.WriteLine("release")
+        $process.StandardInput.Flush()
+        $process.StandardInput.Close()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $probeDiscovery = Complete-ProbeDiscovery -Session $probeSession -OwnedRegistry $probeOwnedRecords `
-            -DeadlineUtc $discoveryDeadline
+            -DeadlineUtc $discoveryDeadline `
+            -OwnershipDiscoveryPasses $probeCapture.ownershipDiscoveryPasses
         if (-not (Wait-TaskUntilDeadline -Task $stdoutTask -Deadline $deadline)) {
             throw "$FailureMessage The interpreter probe stdout drain timed out."
         }
         if (-not (Wait-TaskUntilDeadline -Task $stderrTask -Deadline $deadline)) {
             throw "$FailureMessage The interpreter probe stderr drain timed out."
         }
-        $stdout = $stdoutTask.Result.Trim()
+        $trailingStdout = $stdoutTask.Result.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($trailingStdout)) {
+            throw "$FailureMessage Interpreter probe emitted unexpected trailing stdout."
+        }
         $stderr = $stderrTask.Result.Trim()
         $probeExitCode = [int]$process.ExitCode
         if ($probeExitCode -ne 0) {
             $detail = if ($stderr) { $stderr } else { "no diagnostic output" }
             throw "$FailureMessage Interpreter: $Executable. Details: $detail"
         }
-        $probeParts = $stdout -split '\|', 3
-        if ($probeParts.Count -ne 3 -or ($probeParts[2] -ne "0" -and $probeParts[2] -ne "1")) {
-            throw "$FailureMessage Interpreter probe output omitted the runtime-topology marker."
-        }
-        $expectedRuntimeChild = $probeParts[2] -eq "1"
         $probeTopology = Get-ProbeTopologyEvidence -Session $probeSession -Discovery $probeDiscovery `
             -ExpectedRuntimeChild $expectedRuntimeChild
         $probeSession.DiscoveryComplete = $probeTopology.pass -eq $true
@@ -1605,6 +1685,7 @@ function Invoke-PythonProbe {
 
         $drainDeadline = [DateTime]::UtcNow.AddSeconds($CleanupTimeoutSeconds)
         foreach ($drainEntry in @(
+                [pscustomobject]@{ name = "stdout line"; task = $stdoutLineTask },
                 [pscustomobject]@{ name = "stdout"; task = $stdoutTask },
                 [pscustomobject]@{ name = "stderr"; task = $stderrTask }
             )) {
@@ -1621,7 +1702,8 @@ function Invoke-PythonProbe {
             }
         }
         try {
-            $closeResult = Close-ProbeResources -Process $process -StdoutTask $stdoutTask -StderrTask $stderrTask `
+            $closeResult = Close-ProbeResources -Process $process -StdoutLineTask $stdoutLineTask `
+                -StdoutTask $stdoutTask -StderrTask $stderrTask `
                 -OwnedRecords @($probeOwnedRecords)
             foreach ($closeIssue in @($closeResult.issues)) {
                 $null = $cleanupProblems.Add($closeIssue)
@@ -3863,7 +3945,7 @@ $integrity = Get-EvidenceIntegrity -WorkingDirectory $repoRootPath -ScriptPath $
 $startedAtUtc = [DateTime]::UtcNow
 try {
     $probe = Invoke-PythonProbe -Executable $pythonExecutable `
-        -Code "import fastmcp, os, platform, sys, time; print(platform.python_version() + '|' + str(getattr(fastmcp, '__version__', 'unknown')) + '|' + ('1' if os.path.normcase(sys.executable) != os.path.normcase(getattr(sys, '_base_executable', sys.executable)) else '0'), flush=True); time.sleep(1)" `
+        -Code "import fastmcp, os, platform, sys; print(platform.python_version() + '|' + str(getattr(fastmcp, '__version__', 'unknown')) + '|' + ('1' if os.path.normcase(sys.executable) != os.path.normcase(getattr(sys, '_base_executable', sys.executable)) else '0'), flush=True); sys.stdin.readline()" `
         -FailureMessage "FastMCP is required for the comparison. Install the project server extra into the selected interpreter."
     $probeLifecycle = $probe.cleanup
     $probeParts = ([string]$probe.output) -split '\|', 3
