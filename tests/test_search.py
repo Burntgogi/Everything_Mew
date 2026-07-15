@@ -8,12 +8,13 @@ server = import_module("everything_mcp.server")
 class SearchAdapter:
     name = "fake"
 
-    def __init__(self, hits: list[object]) -> None:
+    def __init__(self, hits: list[object], backend: str = "sdk-ipc") -> None:
         self.hits = hits
+        self.backend = backend
         self.calls: list[dict[str, object]] = []
 
     def status(self) -> Any:
-        return contracts.AdapterStatus(True, True, "sdk-ipc", False)
+        return contracts.AdapterStatus(True, True, self.backend, self.backend == "es-cli")
 
     def search(
         self,
@@ -57,6 +58,21 @@ def test_search_hard_caps_limit_to_100() -> None:
     assert result["countReturned"] == 100
     assert result["truncated"] is True
     assert adapter.calls[0]["limit"] == 101
+
+
+def test_sdk_and_es_adapters_have_the_same_public_limit_sort_and_truncation_contract() -> None:
+    hits = [contracts.SearchHit(path=fr"C:\Work\file{i}.md") for i in range(101)]
+    sdk_adapter = SearchAdapter(hits, backend="sdk-ipc")
+    es_adapter = SearchAdapter(hits, backend="es-cli")
+
+    sdk_result = server.everything_search("ext:md", scope=r"C:\Work", limit=100, sort="date_modified", adapter=sdk_adapter)
+    es_result = server.everything_search("ext:md", scope=r"C:\Work", limit=100, sort="date_modified", adapter=es_adapter)
+
+    assert sdk_result == es_result
+    assert sdk_result["countReturned"] == 100
+    assert sdk_result["truncated"] is True
+    assert sdk_adapter.calls[0]["limit"] == es_adapter.calls[0]["limit"] == 101
+    assert sdk_adapter.calls[0]["sort"] == es_adapter.calls[0]["sort"] == "date_modified"
 
 
 def test_broad_search_does_not_dump_results() -> None:

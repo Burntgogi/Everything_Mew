@@ -2,23 +2,35 @@
 
 from __future__ import annotations
 
+import csv
 import shutil
 import subprocess
-import csv
 from io import StringIO
 from pathlib import Path
 
-from everything_mcp.contracts import AdapterStatus, SearchHit, SortName
+from everything_mcp.contracts import AdapterStatus, HARD_LIMIT, SearchHit, SortName
 from everything_mcp.errors import QueryError
 from everything_mcp.query import compose_query
 
 DEFAULT_ES_TIMEOUT_SECONDS = 15
+STATUS_PROBE_TIMEOUT_SECONDS = 2
+
+ES_RETURN_CODE_NOTES: dict[int, str] = {
+    1: "register window class failure",
+    2: "listening window failure",
+    3: "out of memory",
+    4: "missing option argument",
+    5: "export output failure",
+    6: "unknown switch",
+    7: "failed IPC query",
+    8: "Everything IPC window not found",
+}
 
 SORT_ARGS: dict[str, str] = {
-    "name": "name",
-    "path": "path",
-    "size": "size",
-    "date_modified": "date-modified",
+    "name": "name-ascending",
+    "path": "path-ascending",
+    "size": "size-ascending",
+    "date_modified": "date-modified-ascending",
 }
 
 
@@ -40,9 +52,35 @@ class EsCliAdapter:
     def status(self) -> AdapterStatus:
         notes = list(self.sdk_notes)
         notes.append(f"Using ES CLI fallback at {self.es_exe}.")
+        try:
+            completed = subprocess.run(
+                [str(self.es_exe), "-get-everything-version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                shell=False,
+                timeout=STATUS_PROBE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            notes.append(f"ES CLI status probe timed out after {STATUS_PROBE_TIMEOUT_SECONDS} seconds; Everything is not confirmed running.")
+        except OSError as exc:
+            notes.append(f"ES CLI status probe could not be executed at {self.es_exe}: {exc}")
+        else:
+            if completed.returncode == 0:
+                return AdapterStatus(
+                    everything_installed=self.everything_installed,
+                    everything_running=True,
+                    backend="es-cli",
+                    es_cli_available=True,
+                    notes=tuple(notes),
+                )
+            note = _return_code_note(completed.returncode)
+            if completed.returncode == 8:
+                note += "; start Everything and retry"
+            notes.append(f"ES CLI status probe failed with exit code {completed.returncode}: {note}.")
         return AdapterStatus(
             everything_installed=self.everything_installed,
-            everything_running=True,
+            everything_running=False,
             backend="es-cli",
             es_cli_available=True,
             notes=tuple(notes),
@@ -63,10 +101,23 @@ class EsCliAdapter:
         sort: SortName = "name",
         metadata: bool = False,
     ) -> list[SearchHit]:
-        safe_limit = max(1, min(int(limit), 100))
+        safe_limit = max(1, min(int(limit), HARD_LIMIT + 1))
         args = ["-n", str(safe_limit), "-sort", _sort_arg(sort)]
         if metadata:
-            args.extend(["-csv", "-size", "-dm", "-attribs"])
+            args.extend(
+                [
+                    "-csv",
+                    "-no-header",
+                    "-size",
+                    "-size-format",
+                    "1",
+                    "-no-digit-grouping",
+                    "-dm",
+                    "-date-format",
+                    "3",
+                    "-attribs",
+                ]
+            )
         args.append(self._safe_query_arg(query, scope))
         completed = self._run(args)
         if metadata:
@@ -75,6 +126,7 @@ class EsCliAdapter:
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         try:
+            # Keep locale-aware text decoding; the recorded CSV fixture covers Korean and quoted commas.
             return subprocess.run(
                 [str(self.es_exe), *args],
                 check=True,
@@ -85,7 +137,11 @@ class EsCliAdapter:
             )
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip() if exc.stderr else "no stderr"
-            raise QueryError(f"ES CLI query failed: {stderr}; check syntax or call everything_syntax_help.") from exc
+            note = _return_code_note(exc.returncode)
+            raise QueryError(
+                f"ES CLI query failed with exit code {exc.returncode} ({note}): {stderr}; "
+                "check syntax or call everything_syntax_help."
+            ) from exc
         except subprocess.TimeoutExpired as exc:
             raise QueryError(f"ES CLI query timed out after {DEFAULT_ES_TIMEOUT_SECONDS} seconds; refine the query or check Everything runtime status.") from exc
         except OSError as exc:
@@ -108,13 +164,17 @@ def _sort_arg(sort: SortName) -> str:
         raise QueryError(f"Unsupported ES CLI sort {sort!r}; use one of {', '.join(SORT_ARGS)}.") from exc
 
 
+def _return_code_note(returncode: int) -> str:
+    return ES_RETURN_CODE_NOTES.get(returncode, "unrecognized ES CLI failure")
+
+
 def _parse_metadata_csv(output: str) -> list[SearchHit]:
-    rows = csv.reader(StringIO(output))
+    rows = csv.reader(StringIO(output.lstrip("\ufeff")))
     hits: list[SearchHit] = []
     for row in rows:
         if not row:
             continue
-        path = row[0].strip()
+        path = row[0].lstrip("\ufeff").strip()
         if not path or path.lower() == "filename":
             continue
         hits.append(
