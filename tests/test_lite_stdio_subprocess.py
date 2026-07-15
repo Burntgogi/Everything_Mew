@@ -799,26 +799,32 @@ def test_probe_topology_requires_repeated_post_exit_reconciliation_and_rooted_ro
     source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
     probe_source = measurement_function_source("Invoke-PythonProbe")
     sync_source = measurement_function_source("Sync-OwnedDescendants")
+    register_source = measurement_function_source("Register-OwnedProcess")
     discovery_source = measurement_function_source("Complete-ProbeDiscovery")
     summary_source = measurement_function_source("New-MarkdownSummary")
 
     assert "Complete-ProbeDiscovery" in probe_source
     assert "Get-ProbeTopologyEvidence" in probe_source
-    assert "IncludeExitedParents" in sync_source
+    assert "IncludeExitedParents" not in source
+    assert "-ParentRecord $parent" in sync_source
+    assert "parentStartTimeUtcTicks" in register_source
     assert "while (" in discovery_source
-    assert "-IncludeExitedParents" in discovery_source
+    assert "Sync-OwnedDescendants" in discovery_source
     assert "postExitReconciliationPasses" in discovery_source
     assert "stablePassesRequired" in discovery_source
     assert "probeLifecycle.topology.criterion" in summary_source
     assert "probeLifecycle.topology.stablePassesObserved" in summary_source
     assert "probeLifecycle.topology.stablePassesRequired" in summary_source
-    assert "schemaVersion = 5" in source
+    assert "probeLifecycle.topology.postExitDiscoveryPasses" in summary_source
+    assert "parentStartTimeUtcTicks" in summary_source
+    assert "schemaVersion = 6" in source
 
     body = r"""
 $entries = @(
     [pscustomobject]@{
         pid = 101
         parentPid = 0
+        parentStartTimeUtcTicks = [long]0
         roles = @('launcher')
         owned = $true
         actionable = $true
@@ -829,6 +835,7 @@ $entries = @(
     [pscustomobject]@{
         pid = 102
         parentPid = 101
+        parentStartTimeUtcTicks = [long]1
         roles = @('descendant', 'runtime')
         owned = $true
         actionable = $true
@@ -839,6 +846,7 @@ $entries = @(
     [pscustomobject]@{
         pid = 103
         parentPid = 101
+        parentStartTimeUtcTicks = [long]1
         roles = @('descendant')
         owned = $true
         actionable = $true
@@ -859,6 +867,8 @@ $topology = [pscustomobject]@{
     rootExitObserved = $true
     allOwnedExitedBeforeCleanup = $true
     discoveryScanCount = 4
+    ownershipDiscoveryPasses = 2
+    postExitDiscoveryPasses = 0
     postExitReconciliationPasses = 2
     stablePassesRequired = 2
     stablePassesObserved = 2
@@ -874,6 +884,14 @@ $entries[1].parentPid = 999
 $unrootedFails = -not (Test-ProbeTopologyComplete -Topology $topology -OwnedEntries $entries)
 $entries[1].parentPid = 101
 
+$entries[1].parentStartTimeUtcTicks = [long]999
+$wrongParentIdentityFails = -not (Test-ProbeTopologyComplete -Topology $topology -OwnedEntries $entries)
+$entries[1].parentStartTimeUtcTicks = [long]1
+
+$topology.postExitDiscoveryPasses = 1
+$postExitDiscoveryFails = -not (Test-ProbeTopologyComplete -Topology $topology -OwnedEntries $entries)
+$topology.postExitDiscoveryPasses = 0
+
 $topology.stablePassesObserved = 1
 $unstableFails = -not (Test-ProbeTopologyComplete -Topology $topology -OwnedEntries $entries)
 
@@ -881,6 +899,8 @@ $unstableFails = -not (Test-ProbeTopologyComplete -Topology $topology -OwnedEntr
     valid = $valid
     missingRuntimeFails = $missingRuntimeFails
     unrootedFails = $unrootedFails
+    wrongParentIdentityFails = $wrongParentIdentityFails
+    postExitDiscoveryFails = $postExitDiscoveryFails
     unstableFails = $unstableFails
 } | ConvertTo-Json -Compress
 """
@@ -891,6 +911,168 @@ $unstableFails = -not (Test-ProbeTopologyComplete -Topology $topology -OwnedEntr
 
     assert completed.returncode == 0, completed.stderr
     assert all(json.loads(completed.stdout).values())
+
+
+def test_descendant_is_not_owned_if_exact_parent_exits_before_registration() -> None:
+    body = r"""
+$startInfo = New-Object System.Diagnostics.ProcessStartInfo
+$startInfo.FileName = Join-Path $PSHOME 'powershell.exe'
+$startInfo.Arguments = '-NoProfile -Command "Start-Sleep -Seconds 30"'
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$child = New-Object System.Diagnostics.Process
+$child.StartInfo = $startInfo
+$null = $child.Start()
+$null = $child.Handle
+
+$registry = New-Object System.Collections.ArrayList
+$parent = [pscustomobject]@{
+    pid = 424242
+    parentPid = 0
+    parentStartTimeUtcTicks = [long]0
+    startTimeUtcTicks = [long]123
+    depth = 0
+    roles = @('launcher')
+    owned = $true
+    actionable = $true
+    process = $null
+}
+$session = [pscustomobject]@{
+    Backend = 'pid-reuse-test'
+    Index = 1
+    OwnedProcesses = New-Object System.Collections.ArrayList
+}
+$null = $session.OwnedProcesses.Add($parent)
+$script:stateCalls = 0
+$script:registerCalls = 0
+$script:cimCalls = 0
+
+function Get-RemainingMilliseconds { param([DateTime]$Deadline) return 1000 }
+function Get-OwnedProcessState {
+    param($Record)
+    $script:stateCalls += 1
+    if ($script:stateCalls -eq 1) {
+        return [pscustomobject]@{ status = 'alive-owned' }
+    }
+    return [pscustomobject]@{ status = 'exited' }
+}
+function Get-BoundedCimProcess {
+    param([string]$Filter, [DateTime]$DeadlineUtc, [string]$Context)
+    $script:cimCalls += 1
+    if ($Filter -like 'ParentProcessId*') {
+        return [pscustomobject]@{ ProcessId = [int]$child.Id; Name = 'powershell.exe' }
+    }
+    return [pscustomobject]@{
+        ProcessId = [int]$child.Id
+        ParentProcessId = 424242
+        Name = 'powershell.exe'
+    }
+}
+function Register-ProcessObservation { throw 'no observation should be registered' }
+function Register-OwnedProcess {
+    param($Session, $Process, $Role, $ParentRecord, $Depth, $ImageName, $OwnedRegistry)
+    $script:registerCalls += 1
+    $Process.Dispose()
+    throw 'unsafe ownership registration reached'
+}
+
+$failure = $null
+try {
+    $null = @(Sync-OwnedDescendants -Session $session -OwnedRegistry $registry `
+        -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(2)))
+}
+catch {
+    $failure = $_.Exception.Message
+}
+$child.Refresh()
+$childAliveBeforeCleanup = -not $child.HasExited
+[pscustomobject]@{
+    failedClosed = -not [string]::IsNullOrWhiteSpace($failure)
+    registerCalls = $script:registerCalls
+    ownedCount = $session.OwnedProcesses.Count
+    childAliveBeforeCleanup = $childAliveBeforeCleanup
+    cimCalls = $script:cimCalls
+} | ConvertTo-Json -Compress
+
+try {
+    if (-not $child.HasExited) {
+        $child.Kill()
+        $null = $child.WaitForExit(2000)
+    }
+}
+finally {
+    $child.Dispose()
+}
+"""
+    completed = run_measurement_function_probe(
+        ["Get-ExactProcessIdentity", "Sync-OwnedDescendants"],
+        body,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "failedClosed": True,
+        "registerCalls": 0,
+        "ownedCount": 1,
+        "childAliveBeforeCleanup": True,
+        "cimCalls": 1,
+    }
+
+
+def test_post_exit_probe_reconciliation_validates_retained_records_without_discovery() -> None:
+    body = r"""
+$launcher = [pscustomobject]@{
+    pid = 101
+    parentPid = 0
+    parentStartTimeUtcTicks = [long]0
+    startTimeUtcTicks = [long]1
+    depth = 0
+    roles = @('launcher')
+    owned = $true
+    actionable = $true
+}
+$session = [pscustomobject]@{
+    Backend = 'post-exit-test'
+    Index = 1
+    DiscoveryComplete = $false
+    ForcedCleanup = $false
+    OwnedProcesses = New-Object System.Collections.ArrayList
+}
+$null = $session.OwnedProcesses.Add($launcher)
+$registry = New-Object System.Collections.ArrayList
+$script:syncCalls = 0
+function Sync-OwnedDescendants {
+    param($Session, $OwnedRegistry, [DateTime]$DeadlineUtc, [switch]$BestEffort)
+    $script:syncCalls += 1
+    throw 'post-exit discovery must not run'
+}
+function Get-OwnedProcessState {
+    param($Record)
+    return [pscustomobject]@{ status = 'exited' }
+}
+$result = Complete-ProbeDiscovery -Session $session -OwnedRegistry $registry `
+    -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(2)) -PollMilliseconds 10
+[pscustomobject]@{
+    pass = $result.pass
+    syncCalls = $script:syncCalls
+    ownedCount = $session.OwnedProcesses.Count
+    stablePasses = $result.stablePassesObserved
+    forcedCleanup = $session.ForcedCleanup
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(
+        ["Get-RemainingMilliseconds", "Complete-ProbeDiscovery"],
+        body,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "pass": True,
+        "syncCalls": 0,
+        "ownedCount": 1,
+        "stablePasses": 2,
+        "forcedCleanup": False,
+    }
 
 
 def test_probe_establishes_cleanup_ownership_immediately_after_start() -> None:
@@ -904,9 +1086,21 @@ def test_probe_establishes_cleanup_ownership_immediately_after_start() -> None:
     handle_index = probe_source.index("Open-RetainedProcessHandle", ownership_index)
     identity_index = probe_source.index("Get-ExactProcessIdentity", ownership_index)
     registration_index = probe_source.index("Register-OwnedProcess", ownership_index)
+    session_construction_index = probe_source.index("$probeSession =", ownership_index)
 
     assert start_index < started_index < ownership_index
-    assert ownership_index < min(setup_index, handle_index, identity_index, registration_index)
+    assert re.search(
+        r"(?ms)if \(-not \$process\.Start\(\)\) \{.*?^\s*\}\s*"
+        r"\$processStarted = \$true\s*\$localOwnershipEstablished = \$true",
+        probe_source,
+    )
+    assert ownership_index < min(
+        session_construction_index,
+        setup_index,
+        handle_index,
+        identity_index,
+        registration_index,
+    )
     assert "$processStarted" in probe_source
     assert "Stop-RetainedProcessHandle" in probe_source
     assert "$retainedRootCleanup.waitCompleted" in probe_source
@@ -916,11 +1110,20 @@ def test_probe_establishes_cleanup_ownership_immediately_after_start() -> None:
     assert "GetProcessById" not in retained_cleanup_source
 
 
-@pytest.mark.parametrize("failure_stage", ["session", "handle", "identity", "registration"])
+@pytest.mark.parametrize(
+    "failure_stage", ["construction", "session", "handle", "identity", "registration"]
+)
 def test_probe_setup_failures_kill_wait_and_dispose_retained_process(
     failure_stage: str,
 ) -> None:
     overrides = {
+        "construction": r"""
+function New-ProbeOwnershipSession {
+    param($Process, $OwnedRegistry)
+    $script:probePid = [int]$Process.Id
+    throw 'injected session construction failure'
+}
+""",
         "session": r"""
 function Initialize-ProbeOwnershipSession {
     param($Session)
@@ -1043,6 +1246,7 @@ finally {
             "Wait-TaskUntilDeadline",
             "Wait-ProcessUntilDeadline",
             "Open-RetainedProcessHandle",
+            "New-ProbeOwnershipSession",
             "Initialize-ProbeOwnershipSession",
             "Get-ExactProcessIdentity",
             "Register-OwnedProcess",
@@ -1073,7 +1277,7 @@ def test_measurement_session_establishes_cleanup_ownership_immediately_after_sta
     start_source = measurement_function_source("Start-McpSession")
     close_source = measurement_function_source("Close-SessionStartResources")
 
-    start_index = start_source.index("if (-not $started)")
+    start_index = start_source.index("if (-not $process.Start())")
     started_index = start_source.index("$processStarted = $true", start_index)
     ownership_index = start_source.index("$localOwnershipEstablished = $true", started_index)
     registry_index = start_source.index("Register-ActiveSessionOwnership", ownership_index)
@@ -1082,6 +1286,11 @@ def test_measurement_session_establishes_cleanup_ownership_immediately_after_sta
     registration_index = start_source.index("Register-OwnedProcess", ownership_index)
 
     assert start_index < started_index < ownership_index
+    assert re.search(
+        r"(?ms)if \(-not \$process\.Start\(\)\) \{.*?^\s*\}\s*"
+        r"\$processStarted = \$true\s*\$localOwnershipEstablished = \$true",
+        start_source,
+    )
     assert ownership_index < min(registry_index, handle_index, identity_index, registration_index)
     assert "Stop-RetainedProcessHandle" in start_source
     assert "$startCleanup.waitCompleted" in start_source
@@ -1091,11 +1300,22 @@ def test_measurement_session_establishes_cleanup_ownership_immediately_after_sta
     assert ".Dispose()" in close_source
 
 
-@pytest.mark.parametrize("failure_stage", ["registry", "handle", "identity", "registration"])
+@pytest.mark.parametrize(
+    "failure_stage", ["console", "registry", "handle", "identity", "registration"]
+)
 def test_measurement_session_setup_failures_kill_wait_and_dispose_retained_process(
     failure_stage: str,
 ) -> None:
     overrides = {
+        "console": r"""
+function Set-ConsoleInputEncoding {
+    param($Encoding, $StartedProcess = $null)
+    if ($null -ne $StartedProcess) {
+        $script:sessionPid = [int]$StartedProcess.Id
+        throw 'injected console restoration failure'
+    }
+}
+""",
         "registry": r"""
 function Register-ActiveSessionOwnership {
     param($Registry, $Session)
@@ -1193,6 +1413,7 @@ finally {
     completed = run_measurement_function_probe(
         [
             "Test-ObjectProperty",
+            "Set-ConsoleInputEncoding",
             "Open-RetainedProcessHandle",
             "Register-ActiveSessionOwnership",
             "Get-ExactProcessIdentity",
@@ -1234,7 +1455,8 @@ def test_measurement_cleanup_has_no_delayed_pid_tree_kill_helper() -> None:
     assert "function Invoke-ExactTreeKill" not in source
     assert "Invoke-ExactTreeKill" not in cleanup_source
     assert "retained-handles-child-first" in cleanup_source
-    assert "-IncludeExitedParents" in cleanup_source
+    assert "IncludeExitedParents" not in cleanup_source
+    assert "Sync-OwnedDescendants" in cleanup_source
     assert "Sort-Object depth -Descending" in cleanup_source
     assert "stableReconciliationPasses" in cleanup_source
     assert "Stop-ExactOwnedRecord" in cleanup_source
@@ -1413,6 +1635,7 @@ $lifecycle = [pscustomobject]@{
         [pscustomobject]@{
             pid = 101
             parentPid = 0
+            parentStartTimeUtcTicks = [long]0
             roles = @('launcher', 'runtime')
             startTimeUtc = '2026-01-01T00:00:00Z'
             startTimeUtcTicks = [long]1
@@ -1432,6 +1655,8 @@ $lifecycle = [pscustomobject]@{
         rootExitObserved = $true
         allOwnedExitedBeforeCleanup = $true
         discoveryScanCount = 3
+        ownershipDiscoveryPasses = 1
+        postExitDiscoveryPasses = 0
         postExitReconciliationPasses = 2
         stablePassesRequired = 2
         stablePassesObserved = 2
@@ -1747,9 +1972,10 @@ $validAudit = [pscustomobject]@{
     ownedCount = 2
     observationCount = 0
     ownedIdentitiesComplete = $true
+    ownedEdgesComplete = $true
     entries = @(
-        [pscustomobject]@{ pid = 101; owned = $true; actionable = $true; startTimeUtc = '2026-01-01T00:00:00Z'; startTimeUtcTicks = [long]1; status = 'exited' },
-        [pscustomobject]@{ pid = 102; owned = $true; actionable = $true; startTimeUtc = '2026-01-01T00:00:01Z'; startTimeUtcTicks = [long]2; status = 'exited' }
+        [pscustomobject]@{ pid = 101; parentPid = 0; parentStartTimeUtcTicks = [long]0; owned = $true; actionable = $true; startTimeUtc = '2026-01-01T00:00:00Z'; startTimeUtcTicks = [long]1; status = 'exited' },
+        [pscustomobject]@{ pid = 102; parentPid = 101; parentStartTimeUtcTicks = [long]1; owned = $true; actionable = $true; startTimeUtc = '2026-01-01T00:00:01Z'; startTimeUtcTicks = [long]2; status = 'exited' }
     )
 }
 $validPidAudit = Test-ProcessAuditComplete -Audit $validAudit
@@ -1759,6 +1985,9 @@ $validAudit.alivePids = @()
 $validAudit.entries[0].startTimeUtcTicks = $null
 $missingIdentityFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
 $validAudit.entries[0].startTimeUtcTicks = [long]1
+$validAudit.ownedEdgesComplete = $false
+$missingEdgeFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
+$validAudit.ownedEdgesComplete = $true
 $validAudit.reusedPids = @(101)
 $validAudit.reusedCount = 1
 $reusedPidFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
@@ -1823,6 +2052,7 @@ $missingProbeLifecycleFails = -not (Test-AllExplicitPassComponents -Components $
     validPidAudit = $validPidAudit
     alivePidFails = $alivePidFails
     missingIdentityFails = $missingIdentityFails
+    missingEdgeFails = $missingEdgeFails
     reusedPidFails = $reusedPidFails
     badAuditCountFails = $badAuditCountFails
     missingAuditFails = $missingAuditFails

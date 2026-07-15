@@ -163,6 +163,37 @@ function Open-RetainedProcessHandle {
     $null = $Process.Handle
 }
 
+function Set-ConsoleInputEncoding {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Text.Encoding]$Encoding,
+        [System.Diagnostics.Process]$StartedProcess = $null
+    )
+
+    [Console]::InputEncoding = $Encoding
+}
+
+function New-ProbeOwnershipSession {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry
+    )
+
+    return [pscustomobject]@{
+        Backend = "probe"
+        Index = 0
+        Process = $Process
+        RuntimeProcess = $null
+        OwnedRegistry = $OwnedRegistry
+        OwnedProcesses = New-Object System.Collections.ArrayList
+        ForcedCleanup = $false
+        DiscoveryComplete = $false
+    }
+}
+
 function Initialize-ProbeOwnershipSession {
     param(
         [Parameter(Mandatory = $true)]
@@ -214,13 +245,35 @@ function Register-OwnedProcess {
         [System.Diagnostics.Process]$Process,
         [Parameter(Mandatory = $true)]
         [string]$Role,
-        [int]$ParentPid = 0,
+        [object]$ParentRecord = $null,
         [int]$Depth = 0,
         [string]$ImageName = "",
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
         [System.Collections.ArrayList]$OwnedRegistry
     )
+
+    [int]$parentPid = 0
+    [long]$parentStartTimeUtcTicks = 0
+    if ($null -ne $ParentRecord) {
+        if (
+            $ParentRecord.owned -ne $true -or $ParentRecord.actionable -ne $true -or
+            $null -eq $ParentRecord.process -or $null -eq $ParentRecord.startTimeUtcTicks -or
+            [long]$ParentRecord.startTimeUtcTicks -le 0 -or
+            -not $Session.OwnedProcesses.Contains($ParentRecord)
+        ) {
+            throw "Cannot bind child ownership to a non-exact retained parent record."
+        }
+        $parentState = Get-OwnedProcessState -Record $ParentRecord
+        if ($parentState.status -ne "alive-owned") {
+            throw "Cannot register a descendant after exact parent PID $($ParentRecord.pid) stopped being alive-owned."
+        }
+        $parentPid = [int]$ParentRecord.pid
+        $parentStartTimeUtcTicks = [long]$ParentRecord.startTimeUtcTicks
+    }
+    elseif ($Depth -gt 0) {
+        throw "Descendant ownership requires an exact retained parent record."
+    }
 
     $identity = Get-ExactProcessIdentity -Process $Process
     $existing = @(
@@ -234,6 +287,9 @@ function Register-OwnedProcess {
         }
     ) | Select-Object -First 1
     if ($null -ne $existing) {
+        if ($null -ne $ParentRecord -and (Get-OwnedProcessState -Record $ParentRecord).status -ne "alive-owned") {
+            throw "Cannot add a descendant role after exact parent PID $($ParentRecord.pid) stopped being alive-owned."
+        }
         $existing.roles = @($existing.roles + @($Role) | Select-Object -Unique)
         if (-not $Session.OwnedProcesses.Contains($existing)) {
             $null = $Session.OwnedProcesses.Add($existing)
@@ -251,7 +307,8 @@ function Register-OwnedProcess {
         backend = $Session.Backend
         session = $Session.Index
         pid = [int]$identity.pid
-        parentPid = $ParentPid
+        parentPid = $parentPid
+        parentStartTimeUtcTicks = $parentStartTimeUtcTicks
         depth = $Depth
         imageName = $ImageName
         roles = @($Role)
@@ -263,6 +320,9 @@ function Register-OwnedProcess {
         observationStatus = $null
         issue = $null
         process = $Process
+    }
+    if ($null -ne $ParentRecord -and (Get-OwnedProcessState -Record $ParentRecord).status -ne "alive-owned") {
+        throw "Cannot commit descendant ownership after exact parent PID $($ParentRecord.pid) stopped being alive-owned."
     }
     $null = $OwnedRegistry.Add($record)
     $null = $Session.OwnedProcesses.Add($record)
@@ -278,6 +338,7 @@ function Register-ProcessObservation {
         [Parameter(Mandatory = $true)]
         [string]$Status,
         [int]$ParentPid = 0,
+        [long]$ParentStartTimeUtcTicks = 0,
         [int]$Depth = 0,
         [string]$ImageName = "",
         [string]$Issue = "",
@@ -300,6 +361,7 @@ function Register-ProcessObservation {
         session = $Session.Index
         pid = $ProcessId
         parentPid = $ParentPid
+        parentStartTimeUtcTicks = $ParentStartTimeUtcTicks
         depth = $Depth
         imageName = $ImageName
         roles = @("observation")
@@ -326,7 +388,6 @@ function Sync-OwnedDescendants {
         [System.Collections.ArrayList]$OwnedRegistry,
         [Parameter(Mandatory = $true)]
         [DateTime]$DeadlineUtc,
-        [switch]$IncludeExitedParents,
         [switch]$BestEffort
     )
 
@@ -337,17 +398,12 @@ function Sync-OwnedDescendants {
         throw "$($Session.Backend) session $($Session.Index) has no exact launcher record."
     }
     $queue = New-Object System.Collections.Queue
-    if ($IncludeExitedParents) {
-        foreach ($ownedRecord in @(
-                $Session.OwnedProcesses |
-                    Where-Object { $_.owned -eq $true } |
-                    Sort-Object depth
-            )) {
-            $queue.Enqueue($ownedRecord)
-        }
-    }
-    else {
-        $queue.Enqueue($launcherRecord)
+    foreach ($ownedRecord in @(
+            $Session.OwnedProcesses |
+                Where-Object { $_.owned -eq $true } |
+                Sort-Object depth
+        )) {
+        $queue.Enqueue($ownedRecord)
     }
     $visited = @{}
     $discovered = New-Object System.Collections.ArrayList
@@ -362,10 +418,10 @@ function Sync-OwnedDescendants {
         }
         $visited[$parentKey] = $true
         $parentState = Get-OwnedProcessState -Record $parent
-        if ($parentState.status -eq "exited" -and -not $IncludeExitedParents) {
+        if ($parentState.status -eq "exited") {
             continue
         }
-        if ($parentState.status -ne "alive-owned" -and $parentState.status -ne "exited") {
+        if ($parentState.status -ne "alive-owned") {
             throw "$($Session.Backend) session $($Session.Index) cannot enumerate descendants from non-exact parent PID $($parent.pid): $($parentState.status)"
         }
         try {
@@ -380,12 +436,20 @@ function Sync-OwnedDescendants {
             }
             throw "$($Session.Backend) session $($Session.Index) could not enumerate exact descendants of PID $($parent.pid): $($_.Exception.Message)"
         }
+        $parentState = Get-OwnedProcessState -Record $parent
+        if ($parentState.status -ne "alive-owned") {
+            throw "$($Session.Backend) session $($Session.Index) exact parent PID $($parent.pid) exited or changed identity during child enumeration."
+        }
         foreach ($child in $children) {
             if ((Get-RemainingMilliseconds -Deadline $DeadlineUtc) -le 0) {
                 throw "$($Session.Backend) session $($Session.Index) descendant discovery exceeded its absolute deadline."
             }
             [int]$childPid = $child.ProcessId
             [int]$childDepth = [int]$parent.depth + 1
+            $parentState = Get-OwnedProcessState -Record $parent
+            if ($parentState.status -ne "alive-owned") {
+                throw "$($Session.Backend) session $($Session.Index) exact parent PID $($parent.pid) exited or changed identity before child ownership capture."
+            }
             $childProcess = $null
             try {
                 $childProcess = [System.Diagnostics.Process]::GetProcessById($childPid)
@@ -409,11 +473,13 @@ function Sync-OwnedDescendants {
                 if ($exitedBeforeIdentity) {
                     $null = Register-ProcessObservation -Session $Session -ProcessId $childPid `
                         -Status "exited-before-handle" -ParentPid ([int]$parent.pid) -Depth $childDepth `
+                        -ParentStartTimeUtcTicks ([long]$parent.startTimeUtcTicks) `
                         -ImageName ([string]$child.Name) -Issue $captureIssue -OwnedRegistry $OwnedRegistry
                     continue
                 }
                 $null = Register-ProcessObservation -Session $Session -ProcessId $childPid `
                     -Status "unverifiable-live" -ParentPid ([int]$parent.pid) -Depth $childDepth `
+                    -ParentStartTimeUtcTicks ([long]$parent.startTimeUtcTicks) `
                     -ImageName ([string]$child.Name) -Issue $captureIssue -OwnedRegistry $OwnedRegistry
                 throw "$($Session.Backend) session $($Session.Index) found live descendant PID $childPid without an exact retained handle/start identity."
             }
@@ -431,20 +497,51 @@ function Sync-OwnedDescendants {
                     $childProcess.Dispose()
                     $null = Register-ProcessObservation -Session $Session -ProcessId $childPid `
                         -Status "unverifiable-live" -ParentPid ([int]$parent.pid) -Depth $childDepth `
+                        -ParentStartTimeUtcTicks ([long]$parent.startTimeUtcTicks) `
                         -ImageName ([string]$child.Name) -Issue $_.Exception.Message -OwnedRegistry $OwnedRegistry
                     throw "$($Session.Backend) session $($Session.Index) could not verify parentage for live descendant PID $childPid."
                 }
+            }
+            if ($currentChild.Count -ne 1) {
+                $childProcess.Refresh()
+                if ($childProcess.HasExited) {
+                    $childProcess.Dispose()
+                    $null = Register-ProcessObservation -Session $Session -ProcessId $childPid `
+                        -Status "exited-before-parent-verification" -ParentPid ([int]$parent.pid) `
+                        -ParentStartTimeUtcTicks ([long]$parent.startTimeUtcTicks) -Depth $childDepth `
+                        -ImageName ([string]$child.Name) -OwnedRegistry $OwnedRegistry
+                    continue
+                }
+                $childProcess.Dispose()
+                $null = Register-ProcessObservation -Session $Session -ProcessId $childPid `
+                    -Status "unverifiable-live" -ParentPid ([int]$parent.pid) `
+                    -ParentStartTimeUtcTicks ([long]$parent.startTimeUtcTicks) -Depth $childDepth `
+                    -ImageName ([string]$child.Name) -Issue "parent verification returned $($currentChild.Count) rows" `
+                    -OwnedRegistry $OwnedRegistry
+                throw "$($Session.Backend) session $($Session.Index) could not bind live descendant PID $childPid to one exact retained parent."
             }
             if ($currentChild.Count -eq 1 -and [int]$currentChild[0].ParentProcessId -ne [int]$parent.pid) {
                 $childProcess.Dispose()
                 $null = Register-ProcessObservation -Session $Session -ProcessId $childPid `
                     -Status "pid-reused-before-ownership" -ParentPid ([int]$parent.pid) -Depth $childDepth `
+                    -ParentStartTimeUtcTicks ([long]$parent.startTimeUtcTicks) `
                     -ImageName ([string]$child.Name) -OwnedRegistry $OwnedRegistry
                 continue
             }
-            $record = Register-OwnedProcess -Session $Session -Process $childProcess -Role "descendant" `
-                -ParentPid ([int]$parent.pid) -Depth $childDepth -ImageName ([string]$child.Name) `
-                -OwnedRegistry $OwnedRegistry
+            $parentState = Get-OwnedProcessState -Record $parent
+            if ($parentState.status -ne "alive-owned") {
+                $childProcess.Dispose()
+                throw "$($Session.Backend) session $($Session.Index) exact parent PID $($parent.pid) exited or changed identity before descendant registration."
+            }
+            try {
+                $record = Register-OwnedProcess -Session $Session -Process $childProcess -Role "descendant" `
+                    -ParentRecord $parent -Depth $childDepth -ImageName ([string]$child.Name) `
+                    -OwnedRegistry $OwnedRegistry
+            }
+            catch {
+                $childProcess.Dispose()
+                throw
+            }
             $null = $discovered.Add($record)
             $queue.Enqueue($record)
         }
@@ -681,7 +778,7 @@ function Stop-ExactOwnedProcessTree {
             try {
                 $null = @(
                     Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry `
-                        -DeadlineUtc $discoveryDeadline -IncludeExitedParents -BestEffort
+                        -DeadlineUtc $discoveryDeadline -BestEffort
                 )
                 $discoveryPasses += 1
                 $discoveryComplete = $true
@@ -928,6 +1025,7 @@ function Invoke-OwnedPidAudit {
             session = $record.session
             pid = [int]$record.pid
             parentPid = [int]$record.parentPid
+            parentStartTimeUtcTicks = [long]$record.parentStartTimeUtcTicks
             imageName = [string]$record.imageName
             roles = @($record.roles)
             owned = [bool]$record.owned
@@ -958,9 +1056,28 @@ function Invoke-OwnedPidAudit {
             $null -eq $_.startTimeUtcTicks -or [long]$_.startTimeUtcTicks -le 0 -or [string]::IsNullOrWhiteSpace([string]$_.startTimeUtc)
         }
     ).Count -eq 0
+    $ownedEdgesComplete = $ownedIdentitiesComplete
+    $ownedByIdentity = @{}
+    foreach ($entry in $ownedEntries) {
+        $ownedByIdentity["$([int]$entry.pid):$([long]$entry.startTimeUtcTicks)"] = $entry
+    }
+    foreach ($entry in $ownedEntries) {
+        if ([int]$entry.parentPid -eq 0) {
+            if ([long]$entry.parentStartTimeUtcTicks -ne 0) {
+                $ownedEdgesComplete = $false
+            }
+            continue
+        }
+        if (
+            [long]$entry.parentStartTimeUtcTicks -le 0 -or
+            -not $ownedByIdentity.ContainsKey("$([int]$entry.parentPid):$([long]$entry.parentStartTimeUtcTicks)")
+        ) {
+            $ownedEdgesComplete = $false
+        }
+    }
     return [pscustomobject]@{
         pass = $entries.Count -gt 0 -and $checkedPids.Count -eq $entries.Count -and $ownedEntries.Count -gt 0 -and `
-            $ownedIdentitiesComplete -and $alivePids.Count -eq 0 -and $reusedPids.Count -eq 0 -and `
+            $ownedIdentitiesComplete -and $ownedEdgesComplete -and $alivePids.Count -eq 0 -and $reusedPids.Count -eq 0 -and `
             $unreadablePids.Count -eq 0
         checkedPids = $checkedPids
         alivePids = $alivePids
@@ -973,6 +1090,7 @@ function Invoke-OwnedPidAudit {
         ownedCount = $ownedEntries.Count
         observationCount = $entries.Count - $ownedEntries.Count
         ownedIdentitiesComplete = $ownedIdentitiesComplete
+        ownedEdgesComplete = $ownedEdgesComplete
         entries = [object[]]@($entries)
     }
 }
@@ -1013,16 +1131,13 @@ function Complete-ProbeDiscovery {
 
     $rootExitObserved = $false
     $discoveryScanCount = 0
+    $ownershipDiscoveryPasses = 0
+    $postExitDiscoveryPasses = 0
     $postExitReconciliationPasses = 0
     $stablePassesObserved = 0
     while ((Get-RemainingMilliseconds -Deadline $DeadlineUtc) -gt 0) {
-        $recordCountBefore = @($Session.OwnedProcesses).Count
-        $null = @(
-            Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry `
-                -DeadlineUtc $DeadlineUtc -IncludeExitedParents
-        )
         $discoveryScanCount += 1
-
+        $recordCountBefore = @($Session.OwnedProcesses).Count
         $launcherRecord = @(
             $Session.OwnedProcesses | Where-Object {
                 $_.owned -eq $true -and $_.roles -contains "launcher"
@@ -1032,6 +1147,14 @@ function Complete-ProbeDiscovery {
             throw "Probe discovery lost its exact launcher record."
         }
         $launcherState = Get-OwnedProcessState -Record $launcherRecord
+        if ($launcherState.status -eq "alive-owned") {
+            $null = @(
+                Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry `
+                    -DeadlineUtc $DeadlineUtc
+            )
+            $ownershipDiscoveryPasses += 1
+            $launcherState = Get-OwnedProcessState -Record $launcherRecord
+        }
         if ($launcherState.status -eq "exited") {
             $rootExitObserved = $true
         }
@@ -1071,6 +1194,8 @@ function Complete-ProbeDiscovery {
                 rootExitObserved = $true
                 allOwnedExitedBeforeCleanup = $true
                 discoveryScanCount = $discoveryScanCount
+                ownershipDiscoveryPasses = $ownershipDiscoveryPasses
+                postExitDiscoveryPasses = $postExitDiscoveryPasses
                 postExitReconciliationPasses = $postExitReconciliationPasses
                 stablePassesRequired = $StablePassesRequired
                 stablePassesObserved = $stablePassesObserved
@@ -1112,7 +1237,7 @@ function Get-ProbeTopologyEvidence {
     }
     $runtimeRecords = @($ownedRecords | Where-Object { $_.roles -contains "runtime" })
 
-    $recordsByPid = @{}
+    $recordsByIdentity = @{}
     $exactIdentitiesComplete = $true
     foreach ($record in $ownedRecords) {
         if (
@@ -1121,14 +1246,18 @@ function Get-ProbeTopologyEvidence {
         ) {
             $exactIdentitiesComplete = $false
         }
-        $recordsByPid[[string][int]$record.pid] = $record
+        $identityKey = "$([int]$record.pid):$([long]$record.startTimeUtcTicks)"
+        if ($recordsByIdentity.ContainsKey($identityKey)) {
+            $exactIdentitiesComplete = $false
+        }
+        $recordsByIdentity[$identityKey] = $record
     }
     $parentChainsRooted = $launcherRecords.Count -eq 1
     if ($parentChainsRooted) {
         [int]$launcherPid = $launcherRecords[0].pid
         foreach ($record in $ownedRecords) {
             if ([int]$record.pid -eq $launcherPid) {
-                if ([int]$record.parentPid -ne 0) {
+                if ([int]$record.parentPid -ne 0 -or [long]$record.parentStartTimeUtcTicks -ne 0) {
                     $parentChainsRooted = $false
                 }
                 continue
@@ -1136,18 +1265,21 @@ function Get-ProbeTopologyEvidence {
             $visited = @{}
             $current = $record
             while ([int]$current.pid -ne $launcherPid) {
-                $currentKey = [string][int]$current.pid
-                if ($visited.ContainsKey($currentKey) -or [int]$current.parentPid -le 0) {
+                $currentKey = "$([int]$current.pid):$([long]$current.startTimeUtcTicks)"
+                if (
+                    $visited.ContainsKey($currentKey) -or [int]$current.parentPid -le 0 -or
+                    $null -eq $current.parentStartTimeUtcTicks -or [long]$current.parentStartTimeUtcTicks -le 0
+                ) {
                     $parentChainsRooted = $false
                     break
                 }
                 $visited[$currentKey] = $true
-                $parentKey = [string][int]$current.parentPid
-                if (-not $recordsByPid.ContainsKey($parentKey)) {
+                $parentKey = "$([int]$current.parentPid):$([long]$current.parentStartTimeUtcTicks)"
+                if (-not $recordsByIdentity.ContainsKey($parentKey)) {
                     $parentChainsRooted = $false
                     break
                 }
-                $current = $recordsByPid[$parentKey]
+                $current = $recordsByIdentity[$parentKey]
             }
             if (-not $parentChainsRooted) {
                 break
@@ -1174,6 +1306,7 @@ function Get-ProbeTopologyEvidence {
     $pass = $Discovery.pass -eq $true -and $Discovery.rootExitObserved -eq $true -and
         $Discovery.allOwnedExitedBeforeCleanup -eq $true -and
         [int]$Discovery.stablePassesRequired -ge 2 -and
+        [int]$Discovery.postExitDiscoveryPasses -eq 0 -and
         [int]$Discovery.stablePassesObserved -ge [int]$Discovery.stablePassesRequired -and
         [int]$Discovery.postExitReconciliationPasses -ge [int]$Discovery.stablePassesRequired -and
         $launcherRecords.Count -eq 1 -and $runtimeShapeMatches -and $parentChainsRooted -and
@@ -1181,7 +1314,7 @@ function Get-ProbeTopologyEvidence {
 
     return [pscustomobject]@{
         pass = $pass
-        criterion = "one exact launcher and one expected runtime role; every exact descendant parent chain rooted in the retained launcher; no observations; all exact processes exited; at least two unchanged post-exit reconciliations"
+        criterion = "one exact launcher and one expected runtime role captured while exact parents were alive-owned; every edge binds parent PID plus parent start ticks to a retained identity; no post-exit discovery; no observations; all exact processes exited; at least two unchanged post-exit reconciliations"
         expectedRuntimeChild = $ExpectedRuntimeChild
         launcherCount = $launcherRecords.Count
         runtimeCount = $runtimeRecords.Count
@@ -1191,6 +1324,8 @@ function Get-ProbeTopologyEvidence {
         rootExitObserved = $Discovery.rootExitObserved
         allOwnedExitedBeforeCleanup = $allOwnedExitedBeforeCleanup
         discoveryScanCount = $Discovery.discoveryScanCount
+        ownershipDiscoveryPasses = $Discovery.ownershipDiscoveryPasses
+        postExitDiscoveryPasses = $Discovery.postExitDiscoveryPasses
         postExitReconciliationPasses = $Discovery.postExitReconciliationPasses
         stablePassesRequired = $Discovery.stablePassesRequired
         stablePassesObserved = $Discovery.stablePassesObserved
@@ -1320,22 +1455,13 @@ function Invoke-PythonProbe {
             throw "$FailureMessage The interpreter could not be started: $Executable"
         }
         $processStarted = $true
-        $probeSession = [pscustomobject]@{
-            Backend = "probe"
-            Index = 0
-            Process = $process
-            RuntimeProcess = $null
-            OwnedRegistry = $probeOwnedRecords
-            OwnedProcesses = New-Object System.Collections.ArrayList
-            ForcedCleanup = $false
-            DiscoveryComplete = $false
-        }
         $localOwnershipEstablished = $true
+        $probeSession = New-ProbeOwnershipSession -Process $process -OwnedRegistry $probeOwnedRecords
         $null = Initialize-ProbeOwnershipSession -Session $probeSession
         Open-RetainedProcessHandle -Process $process
         $probeIdentity = Get-ExactProcessIdentity -Process $process
         $null = Register-OwnedProcess -Session $probeSession -Process $process -Role "launcher" `
-            -ParentPid 0 -Depth 0 -ImageName ([IO.Path]::GetFileName($Executable)) `
+            -Depth 0 -ImageName ([IO.Path]::GetFileName($Executable)) `
             -OwnedRegistry $probeOwnedRecords
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -1375,6 +1501,7 @@ function Invoke-PythonProbe {
             $topologyEntries += [pscustomobject]@{
                 pid = [int]$record.pid
                 parentPid = [int]$record.parentPid
+                parentStartTimeUtcTicks = [long]$record.parentStartTimeUtcTicks
                 roles = @($record.roles)
                 startTimeUtc = [string]$record.startTimeUtc
                 startTimeUtcTicks = [long]$record.startTimeUtcTicks
@@ -1409,6 +1536,7 @@ function Invoke-PythonProbe {
                         session = $probeSession.Index
                         pid = [int]$probeIdentity.pid
                         parentPid = 0
+                        parentStartTimeUtcTicks = [long]0
                         depth = 0
                         imageName = [IO.Path]::GetFileName($Executable)
                         roles = @("launcher")
@@ -1545,6 +1673,7 @@ function Invoke-PythonProbe {
             session = 0
             pid = [int]$record.pid
             parentPid = [int]$record.parentPid
+            parentStartTimeUtcTicks = [long]$record.parentStartTimeUtcTicks
             imageName = [string]$record.imageName
             roles = @($record.roles)
             owned = $true
@@ -1612,8 +1741,18 @@ function Get-PythonRuntimeChild {
             }
         }
         if ($runningCandidates.Count -eq 1) {
-            $runtimeRecord = Register-OwnedProcess -Session $Session -Process $runningCandidates[0].process `
-                -Role "runtime" -ParentPid ([int]$runningCandidates[0].parentPid) -Depth ([int]$runningCandidates[0].depth) `
+            $runtimeCandidate = $runningCandidates[0]
+            $parentRecord = @(
+                $Session.OwnedProcesses | Where-Object {
+                    $_.owned -eq $true -and $_.pid -eq $runtimeCandidate.parentPid -and
+                    $_.startTimeUtcTicks -eq $runtimeCandidate.parentStartTimeUtcTicks
+                }
+            ) | Select-Object -First 1
+            if ($null -eq $parentRecord) {
+                throw "$($Session.Backend) session $($Session.Index) runtime child lacked its exact retained parent edge."
+            }
+            $runtimeRecord = Register-OwnedProcess -Session $Session -Process $runtimeCandidate.process `
+                -Role "runtime" -ParentRecord $parentRecord -Depth ([int]$runtimeCandidate.depth) `
                 -ImageName ([string]$runningCandidates[0].imageName) -OwnedRegistry $OwnedRegistry
             $null = @(
                 Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry -DeadlineUtc $deadline
@@ -1815,22 +1954,17 @@ function Start-McpSession {
     $startClose = $null
     $originalConsoleInputEncoding = [Console]::InputEncoding
     try {
-        try {
-            [Console]::InputEncoding = $utf8
-            $started = $process.Start()
-        }
-        finally {
-            [Console]::InputEncoding = $originalConsoleInputEncoding
-        }
-        if (-not $started) {
+        Set-ConsoleInputEncoding -Encoding $utf8
+        if (-not $process.Start()) {
             throw "Failed to start $Backend session $Index."
         }
         $processStarted = $true
         $localOwnershipEstablished = $true
+        Set-ConsoleInputEncoding -Encoding $originalConsoleInputEncoding -StartedProcess $process
         Register-ActiveSessionOwnership -Registry $ProcessRegistry -Session $session
         Open-RetainedProcessHandle -Process $process
         $null = Get-ExactProcessIdentity -Process $process
-        $null = Register-OwnedProcess -Session $session -Process $process -Role "launcher" -ParentPid 0 -Depth 0 `
+        $null = Register-OwnedProcess -Session $session -Process $process -Role "launcher" -Depth 0 `
             -ImageName ([IO.Path]::GetFileName($Executable)) `
             -OwnedRegistry $OwnedRegistry
         $session.StderrTask = $process.StandardError.ReadToEndAsync()
@@ -1839,7 +1973,7 @@ function Start-McpSession {
         }
         else {
             $session.RuntimeProcess = $process
-            $null = Register-OwnedProcess -Session $session -Process $process -Role "runtime" -ParentPid 0 -Depth 0 `
+            $null = Register-OwnedProcess -Session $session -Process $process -Role "runtime" -Depth 0 `
                 -ImageName ([IO.Path]::GetFileName($Executable)) `
                 -OwnedRegistry $OwnedRegistry
         }
@@ -1850,6 +1984,15 @@ function Start-McpSession {
         $startFailure = $_.Exception
     }
     finally {
+        try {
+            Set-ConsoleInputEncoding -Encoding $originalConsoleInputEncoding
+        }
+        catch {
+            if ($null -eq $startFailure) {
+                $startFailure = $_.Exception
+                $startSucceeded = $false
+            }
+        }
         if ($processStarted -and $localOwnershipEstablished -and -not $startSucceeded) {
             $launcherRecord = @(
                 $session.OwnedProcesses | Where-Object {
@@ -2409,7 +2552,8 @@ function Test-ProbeTopologyComplete {
     foreach ($name in @(
             "pass", "criterion", "expectedRuntimeChild", "launcherCount", "runtimeCount",
             "parentChainsRooted", "noUnverifiableObservations", "observationCount", "rootExitObserved",
-            "allOwnedExitedBeforeCleanup", "discoveryScanCount", "postExitReconciliationPasses",
+            "allOwnedExitedBeforeCleanup", "discoveryScanCount", "ownershipDiscoveryPasses",
+            "postExitDiscoveryPasses", "postExitReconciliationPasses",
             "stablePassesRequired", "stablePassesObserved"
         )) {
         if (-not (Test-ObjectProperty -InputObject $Topology -Name $name) -or $null -eq $Topology.$name) {
@@ -2418,6 +2562,7 @@ function Test-ProbeTopologyComplete {
     }
     foreach ($name in @(
             "launcherCount", "runtimeCount", "observationCount", "discoveryScanCount",
+            "ownershipDiscoveryPasses", "postExitDiscoveryPasses",
             "postExitReconciliationPasses", "stablePassesRequired", "stablePassesObserved"
         )) {
         if (-not ($Topology.$name -is [int]) -or [int]$Topology.$name -lt 0) {
@@ -2434,6 +2579,8 @@ function Test-ProbeTopologyComplete {
         $Topology.rootExitObserved -ne $true -or
         $Topology.allOwnedExitedBeforeCleanup -ne $true -or
         [int]$Topology.discoveryScanCount -lt 2 -or
+        ([bool]$Topology.expectedRuntimeChild -and [int]$Topology.ownershipDiscoveryPasses -lt 1) -or
+        [int]$Topology.postExitDiscoveryPasses -ne 0 -or
         [int]$Topology.stablePassesRequired -lt 2 -or
         [int]$Topology.stablePassesObserved -lt [int]$Topology.stablePassesRequired -or
         [int]$Topology.postExitReconciliationPasses -lt [int]$Topology.stablePassesRequired
@@ -2458,6 +2605,7 @@ function Test-ProbeTopologyComplete {
             $null -eq $entry -or
             -not ($entry.pid -is [int]) -or [int]$entry.pid -le 0 -or
             -not ($entry.parentPid -is [int]) -or
+            -not ($entry.parentStartTimeUtcTicks -is [long]) -or
             @($entry.roles).Count -eq 0 -or
             [string]::IsNullOrWhiteSpace([string]$entry.startTimeUtc) -or
             -not ($entry.startTimeUtcTicks -is [long]) -or [long]$entry.startTimeUtcTicks -le 0 -or
@@ -2474,17 +2622,17 @@ function Test-ProbeTopologyComplete {
         return $false
     }
 
-    $entriesByPid = @{}
+    $entriesByIdentity = @{}
     foreach ($entry in $entries) {
-        $key = [string][int]$entry.pid
-        if ($entriesByPid.ContainsKey($key)) {
+        $key = "$([int]$entry.pid):$([long]$entry.startTimeUtcTicks)"
+        if ($entriesByIdentity.ContainsKey($key)) {
             return $false
         }
-        $entriesByPid[$key] = $entry
+        $entriesByIdentity[$key] = $entry
     }
     foreach ($entry in $entries) {
         if ([int]$entry.pid -eq $launcherPid) {
-            if ([int]$entry.parentPid -ne 0) {
+            if ([int]$entry.parentPid -ne 0 -or [long]$entry.parentStartTimeUtcTicks -ne 0) {
                 return $false
             }
             continue
@@ -2492,16 +2640,19 @@ function Test-ProbeTopologyComplete {
         $visited = @{}
         $current = $entry
         while ([int]$current.pid -ne $launcherPid) {
-            $currentKey = [string][int]$current.pid
-            if ($visited.ContainsKey($currentKey) -or [int]$current.parentPid -le 0) {
+            $currentKey = "$([int]$current.pid):$([long]$current.startTimeUtcTicks)"
+            if (
+                $visited.ContainsKey($currentKey) -or [int]$current.parentPid -le 0 -or
+                [long]$current.parentStartTimeUtcTicks -le 0
+            ) {
                 return $false
             }
             $visited[$currentKey] = $true
-            $parentKey = [string][int]$current.parentPid
-            if (-not $entriesByPid.ContainsKey($parentKey)) {
+            $parentKey = "$([int]$current.parentPid):$([long]$current.parentStartTimeUtcTicks)"
+            if (-not $entriesByIdentity.ContainsKey($parentKey)) {
                 return $false
             }
-            $current = $entriesByPid[$parentKey]
+            $current = $entriesByIdentity[$parentKey]
         }
     }
     return $true
@@ -2588,7 +2739,8 @@ function Test-ProcessAuditComplete {
     }
     foreach ($name in @(
             "pass", "checkedPids", "checkedCount", "alivePids", "aliveCount", "reusedPids", "reusedCount",
-            "unreadablePids", "unreadableCount", "ownedCount", "observationCount", "ownedIdentitiesComplete", "entries"
+            "unreadablePids", "unreadableCount", "ownedCount", "observationCount", "ownedIdentitiesComplete",
+            "ownedEdgesComplete", "entries"
         )) {
         if (-not (Test-ObjectProperty -InputObject $Audit -Name $name)) {
             return $false
@@ -2612,6 +2764,7 @@ function Test-ProcessAuditComplete {
     if (
         $Audit.pass -ne $true -or
         $Audit.ownedIdentitiesComplete -ne $true -or
+        $Audit.ownedEdgesComplete -ne $true -or
         $checkedPids.Count -eq 0 -or
         [int]$Audit.checkedCount -ne $checkedPids.Count -or
         [int]$Audit.checkedCount -ne $entries.Count -or
@@ -2644,6 +2797,8 @@ function Test-ProcessAuditComplete {
                 [string]::IsNullOrWhiteSpace([string]$entry.startTimeUtc) -or
                 -not ($entry.startTimeUtcTicks -is [long]) -or
                 [long]$entry.startTimeUtcTicks -le 0 -or
+                -not ($entry.parentPid -is [int]) -or
+                -not ($entry.parentStartTimeUtcTicks -is [long]) -or
                 [string]$entry.status -ne "exited"
             ) {
                 return $false
@@ -3015,6 +3170,7 @@ function Convert-SessionEvidence {
                 [pscustomobject]@{
                     pid = [int]$_.pid
                     parentPid = [int]$_.parentPid
+                    parentStartTimeUtcTicks = [long]$_.parentStartTimeUtcTicks
                     imageName = [string]$_.imageName
                     roles = @($_.roles)
                     owned = [bool]$_.owned
@@ -3583,7 +3739,7 @@ function New-MarkdownSummary {
     $null = $lines.Add("")
     $probeFallback = if (@($Evidence.probeLifecycle.fallbackAttemptedPids).Count) { @($Evidence.probeLifecycle.fallbackAttemptedPids) -join ", " } else { "none" }
     $null = $lines.Add("- Exit code: ``$($Evidence.probeLifecycle.exitCode)``; exact identities: ``$($Evidence.probeLifecycle.ownedCount)``; discovery complete: ``$($Evidence.probeLifecycle.discoveryComplete)``; forced cleanup: ``$($Evidence.probeLifecycle.forcedCleanup)``.")
-    $null = $lines.Add("- Topology completeness criterion: $($Evidence.probeLifecycle.topology.criterion); stable post-exit reconciliations: ``$($Evidence.probeLifecycle.topology.stablePassesObserved)``/``$($Evidence.probeLifecycle.topology.stablePassesRequired)``; rooted parent chains: ``$($Evidence.probeLifecycle.topology.parentChainsRooted)``; observations: ``$($Evidence.probeLifecycle.topology.observationCount)``.")
+    $null = $lines.Add("- Topology completeness criterion: $($Evidence.probeLifecycle.topology.criterion); ownership discovery passes while exact parents were alive: ``$($Evidence.probeLifecycle.topology.ownershipDiscoveryPasses)``; post-exit discovery passes: ``$($Evidence.probeLifecycle.topology.postExitDiscoveryPasses)``; stable post-exit reconciliations: ``$($Evidence.probeLifecycle.topology.stablePassesObserved)``/``$($Evidence.probeLifecycle.topology.stablePassesRequired)``; rooted parent chains: ``$($Evidence.probeLifecycle.topology.parentChainsRooted)``; observations: ``$($Evidence.probeLifecycle.topology.observationCount)``.")
     $null = $lines.Add("- Tree cleanup pass/invoked/wait: ``$($Evidence.probeLifecycle.treeKill.pass)``/``$($Evidence.probeLifecycle.treeKill.invoked)``/``$($Evidence.probeLifecycle.treeKill.waitCompleted)``; retained-handle fallback PIDs: ``$probeFallback``.")
     $null = $lines.Add("- Bounded waits: ``$(@($Evidence.probeLifecycle.waitResults).Count)``; exact exit verifications: ``$(@($Evidence.probeLifecycle.verification).Count)``; disposed unique process handles: ``$($Evidence.probeLifecycle.resourceDisposal.disposedProcessHandleCount)``; pass: ``$($Evidence.probeLifecycle.pass)``.")
     $null = $lines.Add("")
@@ -3612,15 +3768,15 @@ function New-MarkdownSummary {
     $reusedPids = if (@($Evidence.processAudit.reusedPids).Count) { @($Evidence.processAudit.reusedPids) -join ", " } else { "none" }
     $unreadablePids = if (@($Evidence.processAudit.unreadablePids).Count) { @($Evidence.processAudit.unreadablePids) -join ", " } else { "none" }
     $null = $lines.Add("- Checked exact owned PIDs: ``$checkedPids``")
-    $null = $lines.Add("- Counts: checked ``$($Evidence.processAudit.checkedCount)``; owned ``$($Evidence.processAudit.ownedCount)``; observations ``$($Evidence.processAudit.observationCount)``; complete exact identities ``$($Evidence.processAudit.ownedIdentitiesComplete)``.")
+    $null = $lines.Add("- Counts: checked ``$($Evidence.processAudit.checkedCount)``; owned ``$($Evidence.processAudit.ownedCount)``; observations ``$($Evidence.processAudit.observationCount)``; complete exact identities ``$($Evidence.processAudit.ownedIdentitiesComplete)``; complete exact parent edges ``$($Evidence.processAudit.ownedEdgesComplete)``.")
     $null = $lines.Add("- Alive owned PIDs: ``$alivePids``; reused PIDs: ``$reusedPids``; unreadable PIDs: ``$unreadablePids``; pass: ``$($Evidence.processAudit.pass)``")
     $null = $lines.Add("- Ownership is based on retained ``System.Diagnostics.Process`` handles and exact non-null UTC start-time ticks captured at discovery; cleanup never reopens a PID for termination.")
     $null = $lines.Add("")
-    $null = $lines.Add("| Backend | Session | PID | Parent PID | Roles | Image | Recorded start UTC/ticks | Audit status |")
+    $null = $lines.Add("| Backend | Session | PID | Exact parent PID/start ticks | Roles | Image | Recorded start UTC/ticks | Audit status |")
     $null = $lines.Add("| --- | ---: | ---: | ---: | --- | --- | --- | --- |")
     foreach ($entry in @($Evidence.processAudit.entries)) {
         $roles = @($entry.roles) -join ","
-        $null = $lines.Add("| $($entry.backend) | $($entry.session) | $($entry.pid) | $($entry.parentPid) | $roles | $($entry.imageName) | $($entry.startTimeUtc) / $($entry.startTimeUtcTicks) | $($entry.status) |")
+        $null = $lines.Add("| $($entry.backend) | $($entry.session) | $($entry.pid) | $($entry.parentPid) / $($entry.parentStartTimeUtcTicks) | $roles | $($entry.imageName) | $($entry.startTimeUtc) / $($entry.startTimeUtcTicks) | $($entry.status) |")
     }
     $null = $lines.Add("")
     $null = $lines.Add("### Independent exact-PID recheck")
@@ -3792,7 +3948,7 @@ try {
     $pidRecheckPath = Join-Path $outputPath "task-7-pid-recheck-$timestamp.json"
 
     $evidence = [pscustomobject]@{
-        schemaVersion = 5
+        schemaVersion = 6
         generatedAtUtc = [DateTime]::UtcNow.ToString("o")
         durationSeconds = [Math]::Round(([DateTime]::UtcNow - $startedAtUtc).TotalSeconds, 3)
         integrity = $integrity
