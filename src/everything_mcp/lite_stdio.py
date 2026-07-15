@@ -52,7 +52,7 @@ def handle_message(message: dict[str, Any], session: LiteSession | None = None) 
     is_notification = "id" not in message
 
     if not is_notification and not _is_valid_request_id(request_id):
-        return _error(None, -32600, "Invalid Request: id must be a string, number, or null.")
+        return _error(None, -32600, "Invalid Request: id must be a string or number.")
 
     if message.get("jsonrpc") != JSONRPC_VERSION:
         return _error(request_id, -32600, "Invalid Request: jsonrpc must be exactly '2.0'.")
@@ -93,10 +93,19 @@ def handle_message(message: dict[str, Any], session: LiteSession | None = None) 
     if method == "tools/list":
         return _result(request_id, {"tools": tool_definitions()})
     if method == "tools/call":
-        params = _params_object(message)
-        if params is None:
-            return _error(request_id, -32602, "Invalid params: expected object.")
-        return _result(request_id, _call_tool_result(params))
+        raw_params = message.get("params")
+        if not isinstance(raw_params, dict):
+            return _error(request_id, -32602, "Invalid params: tools/call params must be an object.")
+        params = cast(dict[str, Any], raw_params)
+        name = params.get("name")
+        if not isinstance(name, str) or not name:
+            return _error(request_id, -32602, "Invalid params: tool name must be a non-empty string.")
+        arguments = params.get("arguments", {})
+        if not isinstance(arguments, dict):
+            return _error(request_id, -32602, "Invalid params: tool arguments must be an object.")
+        if name not in TOOL_SPEC_BY_NAME:
+            return _error(request_id, -32602, f"Unknown tool: {name}")
+        return _result(request_id, _call_tool_result(name, cast(dict[str, Any], arguments)))
     return _error(request_id, -32601, f"Method not found: {method}")
 
 
@@ -157,28 +166,8 @@ def _initialize_params_error(params: dict[str, Any]) -> str | None:
     return None
 
 
-def _params_object(message: dict[str, Any]) -> dict[str, Any] | None:
-    params = message.get("params")
-    if params is None:
-        return {}
-    if not isinstance(params, dict):
-        return None
-    return params
-
-
-def _call_tool_result(params: dict[str, Any]) -> dict[str, Any]:
-    name = params.get("name")
-    if not isinstance(name, str):
-        return _tool_error("Missing tool name.")
-
-    arguments = params.get("arguments", {})
-    if not isinstance(arguments, dict):
-        return _tool_error("Tool arguments must be an object.")
-
-    spec = TOOL_SPEC_BY_NAME.get(name)
-    if spec is None:
-        return _tool_error(f"Unknown tool: {name}")
-
+def _call_tool_result(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    spec = TOOL_SPEC_BY_NAME[name]
     try:
         validated_arguments = validate_tool_arguments(spec, arguments)
     except ToolValidationError as exc:
@@ -218,7 +207,7 @@ def _server_tool(name: str) -> ToolFunc:
 
 
 def _is_valid_request_id(value: Any) -> bool:
-    if value is None or isinstance(value, str):
+    if isinstance(value, str):
         return True
     if isinstance(value, bool):
         return False

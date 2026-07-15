@@ -457,8 +457,8 @@ def test_lite_stdio_rejects_messages_without_exact_jsonrpc_version() -> None:
         }
 
 
-@pytest.mark.parametrize("request_id", ["request-1", 1, 1.5, None])
-def test_lite_stdio_accepts_string_number_and_null_request_ids(request_id: str | int | float | None) -> None:
+@pytest.mark.parametrize("request_id", ["request-1", 1, 1.5])
+def test_lite_stdio_accepts_string_and_number_request_ids(request_id: str | int | float) -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
 
     response = lite_stdio.handle_message(request("ping", id_=request_id), lite_stdio.LiteSession())
@@ -468,8 +468,8 @@ def test_lite_stdio_accepts_string_number_and_null_request_ids(request_id: str |
 
 @pytest.mark.parametrize(
     "invalid_id",
-    [[1], {"nested": "id"}, True, float("nan"), float("inf"), float("-inf")],
-    ids=["list", "object", "bool", "nan", "positive-infinity", "negative-infinity"],
+    [None, [1], {"nested": "id"}, True, float("nan"), float("inf"), float("-inf")],
+    ids=["null", "list", "object", "bool", "nan", "positive-infinity", "negative-infinity"],
 )
 def test_lite_stdio_rejects_invalid_initialize_ids_without_advancing_session(invalid_id: object) -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
@@ -484,7 +484,7 @@ def test_lite_stdio_rejects_invalid_initialize_ids_without_advancing_session(inv
     assert response == {
         "jsonrpc": "2.0",
         "id": None,
-        "error": {"code": -32600, "message": "Invalid Request: id must be a string, number, or null."},
+        "error": {"code": -32600, "message": "Invalid Request: id must be a string or number."},
     }
     assert session.state is lite_stdio.SessionState.NEW
 
@@ -672,6 +672,47 @@ def test_lite_stdio_validates_count_required_string_before_importing_server() ->
     assert "everything_mcp.server" not in sys.modules
 
 
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        pytest.param(MISSING_PARAMS, "Invalid params: tools/call params must be an object.", id="missing-params"),
+        pytest.param(None, "Invalid params: tools/call params must be an object.", id="null-params"),
+        pytest.param([], "Invalid params: tools/call params must be an object.", id="array-params"),
+        pytest.param({}, "Invalid params: tool name must be a non-empty string.", id="missing-name"),
+        pytest.param({"name": None}, "Invalid params: tool name must be a non-empty string.", id="null-name"),
+        pytest.param({"name": 7}, "Invalid params: tool name must be a non-empty string.", id="number-name"),
+        pytest.param({"name": ""}, "Invalid params: tool name must be a non-empty string.", id="empty-name"),
+        pytest.param(
+            {"name": "everything_status", "arguments": None},
+            "Invalid params: tool arguments must be an object.",
+            id="null-arguments",
+        ),
+        pytest.param(
+            {"name": "everything_status", "arguments": []},
+            "Invalid params: tool arguments must be an object.",
+            id="array-arguments",
+        ),
+    ],
+)
+def test_lite_stdio_rejects_malformed_call_tool_requests_at_protocol_layer(
+    params: object,
+    message: str,
+) -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
+    tool_request: dict[str, Any] = {"jsonrpc": "2.0", "id": "malformed-tool", "method": "tools/call"}
+    if params is not MISSING_PARAMS:
+        tool_request["params"] = params
+
+    response = lite_stdio.handle_message(tool_request, session)
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": "malformed-tool",
+        "error": {"code": -32602, "message": message},
+    }
+
+
 def test_lite_stdio_rejects_unknown_tool_without_importing_server() -> None:
     sys.modules.pop("everything_mcp.server", None)
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
@@ -682,7 +723,11 @@ def test_lite_stdio_rejects_unknown_tool_without_importing_server() -> None:
         session,
     )
 
-    assert response["result"]["content"][0]["text"] == "Unknown tool: everything_delete"
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {"code": -32602, "message": "Unknown tool: everything_delete"},
+    }
     assert "everything_mcp.server" not in sys.modules
 
 
@@ -711,5 +756,5 @@ def test_lite_stdio_rejects_non_object_method_params() -> None:
     assert response == {
         "jsonrpc": "2.0",
         "id": 10,
-        "error": {"code": -32602, "message": "Invalid params: expected object."},
+        "error": {"code": -32602, "message": "Invalid params: tools/call params must be an object."},
     }

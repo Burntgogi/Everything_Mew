@@ -39,6 +39,11 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 - `everything-mew-lite`와 `everything-mcp-lite` 콘솔 진입점을 추가했습니다.
 - 모듈 실행을 선호하는 호스트를 위해 `python -m everything_mcp.lite_stdio`를 제공합니다.
 - lite 경로는 대기 중 FastMCP를 import하지 않고 `initialize`, `ping`, `tools/list`, `tools/call`에 응답합니다.
+- lite 경로는 MCP 2025-11-25 도구 오류 경계를 따릅니다. 잘못된
+  `tools/call` 요청과 알 수 없는 도구는 JSON-RPC `-32602`를 반환하고, 스키마에
+  맞는 알려진 도구 호출의 인자·실행 실패는 `result.isError: true`로 반환합니다.
+  명시적인 `id: null` 요청은 `-32600`이며, `id`가 없는 메시지는 notification으로
+  유지합니다.
 - Everything SDK/IPC 백엔드는 실제 도구가 호출될 때까지 로드를 지연합니다.
 - 기존 `everything-mew`와 `everything-mcp` 진입점은 FastMCP 경로로 계속 사용할 수 있습니다.
 - 패키지 최상위 import는 FastMCP 서버 모듈을 lazy-loading하도록 바뀌었습니다.

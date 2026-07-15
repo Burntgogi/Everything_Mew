@@ -394,6 +394,79 @@ def test_lite_stdio_subprocess_reports_protocol_errors_without_tracebacks() -> N
     assert "Traceback" not in process.stdout
 
 
+def test_lite_stdio_subprocess_enforces_call_tool_protocol_error_boundary() -> None:
+    initialize_params = {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {"name": "protocol-boundary-test", "version": "1"},
+    }
+    process = run_lite(
+        [
+            {"jsonrpc": "2.0", "id": None, "method": "initialize", "params": initialize_params},
+            {"jsonrpc": "2.0", "id": "initialize", "method": "initialize", "params": initialize_params},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {"name": "notification-must-not-run", "arguments": {}},
+            },
+            {"jsonrpc": "2.0", "id": "missing-params", "method": "tools/call"},
+            {"jsonrpc": "2.0", "id": "missing-name", "method": "tools/call", "params": {}},
+            {"jsonrpc": "2.0", "id": "non-string-name", "method": "tools/call", "params": {"name": 7}},
+            {"jsonrpc": "2.0", "id": "empty-name", "method": "tools/call", "params": {"name": ""}},
+            {
+                "jsonrpc": "2.0",
+                "id": "non-object-arguments",
+                "method": "tools/call",
+                "params": {"name": "everything_status", "arguments": None},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "unknown-tool",
+                "method": "tools/call",
+                "params": {"name": "everything_delete", "arguments": {}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "typed-argument-error",
+                "method": "tools/call",
+                "params": {"name": "everything_count", "arguments": {"query": 42}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "valid-tool",
+                "method": "tools/call",
+                "params": {"name": "everything_syntax_help", "arguments": {"topic": "filters"}},
+            },
+        ]
+    )
+    responses = parse_stdout(process)
+    response_by_id = {response["id"]: response for response in responses}
+
+    assert process.returncode == 0
+    assert process.stderr == ""
+    assert len(responses) == 10
+    assert response_by_id[None] == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32600, "message": "Invalid Request: id must be a string or number."},
+    }
+    assert response_by_id["initialize"]["result"]["protocolVersion"] == "2025-11-25"
+
+    protocol_error_ids = {
+        "missing-params",
+        "missing-name",
+        "non-string-name",
+        "empty-name",
+        "non-object-arguments",
+        "unknown-tool",
+    }
+    assert all(response_by_id[response_id]["error"]["code"] == -32602 for response_id in protocol_error_ids)
+    assert response_by_id["typed-argument-error"]["result"]["isError"] is True
+    assert response_by_id["valid-tool"]["result"]["isError"] is False
+    assert "Traceback" not in process.stdout
+
+
 def test_lite_stdio_runs_six_isolated_repeated_sessions_and_exits_at_eof() -> None:
     session_inputs = [repeated_session_payload(index) for index in range(1, SESSION_COUNT + 1)]
     processes = run_lite_sessions([payload for payload, _ in session_inputs])

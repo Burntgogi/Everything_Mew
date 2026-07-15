@@ -39,6 +39,11 @@ hosts that keep one server process alive per active session.
 - `everything-mew-lite` and `everything-mcp-lite` are new console entrypoints.
 - `python -m everything_mcp.lite_stdio` is available for hosts that prefer module-based commands.
 - The lite path answers `initialize`, `ping`, `tools/list`, and `tools/call` without importing FastMCP while idle.
+- The lite path follows the MCP 2025-11-25 tool error boundary: malformed
+  `tools/call` requests and unknown tools return JSON-RPC `-32602`, while
+  schema-valid known tool calls report argument or execution failures through
+  `result.isError: true`. Explicit `id: null` requests return `-32600`; messages
+  without an `id` remain notifications.
 - Everything SDK/IPC backend loading is deferred until a tool is actually called.
 - Existing `everything-mew` and `everything-mcp` entrypoints remain available for the FastMCP path.
 - The package top-level import now lazy-loads the FastMCP server module.

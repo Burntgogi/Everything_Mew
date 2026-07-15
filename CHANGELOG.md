@@ -39,6 +39,9 @@ change only when the release branch is cut.
   required-length call, including the exact 32,767-character limit.
 - Make `everything-mew-lite` the primary always-on configuration example while
   retaining FastMCP as an optional compatibility path.
+- Align lite `tools/call` errors with MCP 2025-11-25: malformed requests and
+  unknown tools use JSON-RPC `-32602`, known-tool validation and execution
+  failures use `isError: true`, and explicit null request IDs are invalid.
 
 ### 한국어
 
@@ -67,3 +70,6 @@ change only when the release branch is cut.
   경로를 가져와 정확히 32,767자인 경로까지 처리합니다.
 - 항상 켜 두는 기본 설정 예시는 `everything-mew-lite`로 변경하고 FastMCP는
   선택 가능한 호환 경로로 유지합니다.
+- lite `tools/call` 오류를 MCP 2025-11-25에 맞춰 잘못된 요청과 알 수 없는
+  도구는 JSON-RPC `-32602`, 알려진 도구의 검증·실행 실패는 `isError: true`로
+  반환하고 명시적인 null 요청 ID는 거부합니다.
