@@ -153,6 +153,33 @@ function Wait-ProcessUntilDeadline {
     return $Process.WaitForExit($remainingMilliseconds)
 }
 
+function Open-RetainedProcessHandle {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process
+    )
+
+    $Process.EnableRaisingEvents = $true
+    $null = $Process.Handle
+}
+
+function Initialize-ProbeOwnershipSession {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session
+    )
+
+    foreach ($name in @("Backend", "Index", "Process", "OwnedProcesses", "ForcedCleanup", "DiscoveryComplete")) {
+        if (-not (Test-ObjectProperty -InputObject $Session -Name $name)) {
+            throw "Probe ownership session omitted required property '$name'."
+        }
+    }
+    if ($null -eq $Session.Process -or $null -eq $Session.OwnedProcesses) {
+        throw "Probe ownership session did not retain its root process and exact-record collection."
+    }
+    return $Session
+}
+
 function Get-ExactProcessIdentity {
     param(
         [Parameter(Mandatory = $true)]
@@ -299,6 +326,7 @@ function Sync-OwnedDescendants {
         [System.Collections.ArrayList]$OwnedRegistry,
         [Parameter(Mandatory = $true)]
         [DateTime]$DeadlineUtc,
+        [switch]$IncludeExitedParents,
         [switch]$BestEffort
     )
 
@@ -309,7 +337,18 @@ function Sync-OwnedDescendants {
         throw "$($Session.Backend) session $($Session.Index) has no exact launcher record."
     }
     $queue = New-Object System.Collections.Queue
-    $queue.Enqueue($launcherRecord)
+    if ($IncludeExitedParents) {
+        foreach ($ownedRecord in @(
+                $Session.OwnedProcesses |
+                    Where-Object { $_.owned -eq $true } |
+                    Sort-Object depth
+            )) {
+            $queue.Enqueue($ownedRecord)
+        }
+    }
+    else {
+        $queue.Enqueue($launcherRecord)
+    }
     $visited = @{}
     $discovered = New-Object System.Collections.ArrayList
     while ($queue.Count -gt 0) {
@@ -323,10 +362,10 @@ function Sync-OwnedDescendants {
         }
         $visited[$parentKey] = $true
         $parentState = Get-OwnedProcessState -Record $parent
-        if ($parentState.status -eq "exited") {
+        if ($parentState.status -eq "exited" -and -not $IncludeExitedParents) {
             continue
         }
-        if ($parentState.status -ne "alive-owned") {
+        if ($parentState.status -ne "alive-owned" -and $parentState.status -ne "exited") {
             throw "$($Session.Backend) session $($Session.Index) cannot enumerate descendants from non-exact parent PID $($parent.pid): $($parentState.status)"
         }
         try {
@@ -471,62 +510,127 @@ function Get-OwnedProcessState {
     }
 }
 
-function Invoke-ExactTreeKill {
+function Stop-RetainedProcessHandle {
     param(
         [Parameter(Mandatory = $true)]
-        [System.Diagnostics.Process]$RootProcess,
-        [Parameter(Mandatory = $true)]
-        [long]$ExpectedStartTimeUtcTicks,
-        [int]$TimeoutSeconds = 10
+        [System.Diagnostics.Process]$Process,
+        [ValidateRange(1, 30)]
+        [int]$TimeoutSeconds = 5
     )
 
+    $issues = New-Object System.Collections.ArrayList
+    $killAttempted = $false
+    $waitCompleted = $false
+    $exited = $false
     try {
-        $rootIdentity = Get-ExactProcessIdentity -Process $RootProcess
-        if ([long]$rootIdentity.startTimeUtcTicks -ne $ExpectedStartTimeUtcTicks) {
-            return [pscustomobject]@{ pass = $false; invoked = $false; waitCompleted = $true; exitCode = $null; issue = "launcher identity changed" }
+        $Process.Refresh()
+        $exited = $Process.HasExited
+    }
+    catch {
+        $null = $issues.Add("retained root initial state check failed: $($_.Exception.Message)")
+    }
+    if (-not $exited) {
+        try {
+            $killAttempted = $true
+            $Process.Kill()
         }
-        $RootProcess.Refresh()
-        if ($RootProcess.HasExited) {
-            return [pscustomobject]@{ pass = $true; invoked = $false; waitCompleted = $true; exitCode = $null; issue = $null }
+        catch {
+            $null = $issues.Add("retained root kill failed: $($_.Exception.Message)")
+        }
+        try {
+            $waitCompleted = $Process.WaitForExit($TimeoutSeconds * 1000)
+            if (-not $waitCompleted) {
+                $null = $issues.Add("retained root did not exit within $TimeoutSeconds seconds")
+            }
+        }
+        catch {
+            $null = $issues.Add("retained root bounded wait failed: $($_.Exception.Message)")
+        }
+    }
+    else {
+        $waitCompleted = $true
+    }
+    try {
+        $Process.Refresh()
+        $exited = $Process.HasExited
+    }
+    catch {
+        $exited = $false
+        $null = $issues.Add("retained root final exit verification failed: $($_.Exception.Message)")
+    }
+    return [pscustomobject]@{
+        pass = $issues.Count -eq 0 -and $waitCompleted -and $exited
+        killAttempted = $killAttempted
+        waitCompleted = $waitCompleted
+        exited = $exited
+        issue = if ($issues.Count) { @($issues) -join "; " } else { $null }
+    }
+}
+
+function Stop-ExactOwnedRecord {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session,
+        [Parameter(Mandatory = $true)]
+        [object]$Record,
+        [ValidateRange(1, 30)]
+        [int]$TimeoutSeconds = 5
+    )
+
+    $state = Get-OwnedProcessState -Record $Record
+    if ($state.status -eq "exited") {
+        return [pscustomobject]@{
+            pid = [int]$Record.pid
+            startTimeUtcTicks = [long]$Record.startTimeUtcTicks
+            killAttempted = $false
+            waitCompleted = $true
+            exited = $true
+            statusBefore = "exited"
+            issue = $null
+        }
+    }
+    if ($state.status -ne "alive-owned") {
+        return [pscustomobject]@{
+            pid = [int]$Record.pid
+            startTimeUtcTicks = $Record.startTimeUtcTicks
+            killAttempted = $false
+            waitCompleted = $false
+            exited = $false
+            statusBefore = $state.status
+            issue = "owned PID $($Record.pid) was not safe for exact handle cleanup: $($state.status); $($state.issue)"
+        }
+    }
+
+    $Session.ForcedCleanup = $true
+    $waitCompleted = $false
+    $issue = $null
+    try {
+        $Record.process.Kill()
+        $waitCompleted = $Record.process.WaitForExit($TimeoutSeconds * 1000)
+        if (-not $waitCompleted) {
+            $issue = "exact retained PID $($Record.pid) did not exit within $TimeoutSeconds seconds"
         }
     }
     catch {
-        return [pscustomobject]@{ pass = $false; invoked = $false; waitCompleted = $true; exitCode = $null; issue = $_.Exception.Message }
+        $issue = "exact retained PID $($Record.pid) cleanup failed: $($_.Exception.Message)"
     }
-
-    [int]$rootPid = $RootProcess.Id
-    $taskkillPath = Join-Path $env:SystemRoot "System32\taskkill.exe"
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $taskkillPath
-    $startInfo.Arguments = "/PID $rootPid /T /F"
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $startInfo
-    if (-not $process.Start()) {
-        return [pscustomobject]@{ pass = $false; invoked = $true; waitCompleted = $false; exitCode = $null; issue = "taskkill.exe did not start" }
+    $postState = Get-OwnedProcessState -Record $Record
+    $exited = $postState.status -eq "exited"
+    if ($exited -and -not $waitCompleted) {
+        $waitCompleted = $true
+        $issue = $null
     }
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    if (-not (Wait-ProcessUntilDeadline -Process $process -Deadline $deadline)) {
-        try { $process.Kill() } catch { }
-        $null = $process.WaitForExit(2000)
-        return [pscustomobject]@{ pass = $false; invoked = $true; waitCompleted = $false; exitCode = $null; issue = "taskkill.exe timed out" }
-    }
-    $stdoutComplete = Wait-TaskUntilDeadline -Task $stdoutTask -Deadline $deadline
-    $stderrComplete = Wait-TaskUntilDeadline -Task $stderrTask -Deadline $deadline
-    if (-not $stdoutComplete -or -not $stderrComplete) {
-        return [pscustomobject]@{ pass = $false; invoked = $true; waitCompleted = $true; exitCode = [int]$process.ExitCode; issue = "taskkill.exe pipe drain timed out" }
+    elseif (-not $exited -and [string]::IsNullOrWhiteSpace($issue)) {
+        $issue = "exact retained PID $($Record.pid) remained $($postState.status) after cleanup"
     }
     return [pscustomobject]@{
-        pass = $process.ExitCode -eq 0
-        invoked = $true
-        waitCompleted = $true
-        exitCode = [int]$process.ExitCode
-        issue = if ($process.ExitCode -eq 0) { $null } else { $stderrTask.Result.Trim() }
+        pid = [int]$Record.pid
+        startTimeUtcTicks = [long]$Record.startTimeUtcTicks
+        killAttempted = $true
+        waitCompleted = $waitCompleted
+        exited = $exited
+        statusBefore = $state.status
+        issue = $issue
     }
 }
 
@@ -545,132 +649,125 @@ function Stop-ExactOwnedProcessTree {
 
     $issues = New-Object System.Collections.ArrayList
     $warnings = New-Object System.Collections.ArrayList
-    $waitResults = New-Object System.Collections.ArrayList
     $fallbackAttemptedPids = New-Object System.Collections.ArrayList
     $verification = New-Object System.Collections.ArrayList
-    $discoveryComplete = $null -ne $Session.PSObject.Properties["DiscoveryComplete"] -and
-        $Session.DiscoveryComplete -eq $true
+    $cleanupOutcomes = @{}
+    $discoveryComplete = $false
     $discoveryIssue = $null
+    $discoveryPasses = 0
+    $stableReconciliationPasses = 0
+    $stableReconciliationPassesRequired = 2
     $discoveryDeadline = [DateTime]::UtcNow.AddSeconds($DiscoveryTimeoutSeconds)
-    $launcherRecord = @(
+    $launcherRecords = @(
         $Session.OwnedProcesses | Where-Object { $_.owned -eq $true -and $_.roles -contains "launcher" }
-    ) | Select-Object -First 1
+    )
     $treeKill = [pscustomobject]@{
-        pass = $false
+        pass = $true
         invoked = $false
         waitCompleted = $true
         exitCode = $null
-        issue = "exact launcher was unavailable"
+        method = "retained-handles-child-first"
+        issue = $null
     }
-    if ($null -ne $launcherRecord) {
-        $launcherState = Get-OwnedProcessState -Record $launcherRecord
-        if ($launcherState.status -eq "alive-owned") {
+    if ($launcherRecords.Count -ne 1) {
+        $null = $issues.Add("session did not retain exactly one launcher identity for cleanup")
+    }
+    else {
+        while (
+            (Get-RemainingMilliseconds -Deadline $discoveryDeadline) -gt 0 -and
+            $stableReconciliationPasses -lt $stableReconciliationPassesRequired
+        ) {
+            $recordCountBefore = @($Session.OwnedProcesses).Count
             try {
                 $null = @(
                     Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry `
-                        -DeadlineUtc $discoveryDeadline -BestEffort
+                        -DeadlineUtc $discoveryDeadline -IncludeExitedParents -BestEffort
                 )
+                $discoveryPasses += 1
                 $discoveryComplete = $true
-                if ($null -ne $Session.PSObject.Properties["DiscoveryComplete"]) {
-                    $Session.DiscoveryComplete = $true
-                }
             }
             catch {
                 $discoveryComplete = $false
                 $discoveryIssue = $_.Exception.Message
                 $null = $warnings.Add($discoveryIssue)
+                break
             }
-            $launcherState = Get-OwnedProcessState -Record $launcherRecord
-        }
-        if ($launcherState.status -eq "alive-owned") {
-            $Session.ForcedCleanup = $true
-            try {
-                $treeKill = Invoke-ExactTreeKill -RootProcess $launcherRecord.process `
-                    -ExpectedStartTimeUtcTicks ([long]$launcherRecord.startTimeUtcTicks) `
+
+            foreach ($record in @(
+                    $Session.OwnedProcesses |
+                        Where-Object { $_.owned -eq $true } |
+                        Sort-Object depth -Descending
+                )) {
+                $recordKey = "$($record.pid):$($record.startTimeUtcTicks)"
+                if ($cleanupOutcomes.ContainsKey($recordKey)) {
+                    continue
+                }
+                $outcome = Stop-ExactOwnedRecord -Session $Session -Record $record `
                     -TimeoutSeconds $HandleWaitTimeoutSeconds
-            }
-            catch {
-                $treeKill = [pscustomobject]@{
-                    pass = $false
-                    invoked = $false
-                    waitCompleted = $false
-                    exitCode = $null
-                    issue = $_.Exception.Message
+                $cleanupOutcomes[$recordKey] = $outcome
+                if ($outcome.killAttempted) {
+                    $null = $fallbackAttemptedPids.Add([int]$outcome.pid)
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$outcome.issue)) {
+                    $null = $issues.Add($outcome.issue)
                 }
             }
-            if ($treeKill.pass -ne $true) {
-                $null = $warnings.Add("exact launcher tree cleanup failed for PID $($launcherRecord.pid): $($treeKill.issue)")
+
+            $ownedStates = @(
+                $Session.OwnedProcesses |
+                    Where-Object { $_.owned -eq $true } |
+                    ForEach-Object { Get-OwnedProcessState -Record $_ }
+            )
+            $allOwnedExited = $ownedStates.Count -gt 0 -and @(
+                $ownedStates | Where-Object { $_.status -ne "exited" }
+            ).Count -eq 0
+            $recordCountAfter = @($Session.OwnedProcesses).Count
+            if ($allOwnedExited -and $recordCountAfter -eq $recordCountBefore) {
+                $stableReconciliationPasses += 1
+            }
+            else {
+                $stableReconciliationPasses = 0
+            }
+            if ($stableReconciliationPasses -lt $stableReconciliationPassesRequired) {
+                $remainingMilliseconds = Get-RemainingMilliseconds -Deadline $discoveryDeadline
+                if ($remainingMilliseconds -gt 0) {
+                    Start-Sleep -Milliseconds ([Math]::Min(25, $remainingMilliseconds))
+                }
             }
         }
-        elseif ($launcherState.status -eq "exited") {
-            $treeKill = [pscustomobject]@{
-                pass = $true
-                invoked = $false
-                waitCompleted = $true
-                exitCode = $null
-                issue = $null
-            }
-        }
-        else {
-            $null = $issues.Add("launcher PID $($launcherRecord.pid) was not safe for tree cleanup: $($launcherState.status)")
-        }
-    }
-    else {
-        $null = $issues.Add("session had no exact retained launcher for cleanup")
     }
 
-    foreach ($record in @($Session.OwnedProcesses | Where-Object { $_.owned -eq $true } | Sort-Object depth -Descending)) {
-        $state = Get-OwnedProcessState -Record $record
-        if ($state.status -eq "exited") {
-            $null = $waitResults.Add([pscustomobject]@{
-                    pid = [int]$record.pid
-                    killAttempted = $false
-                    waitCompleted = $true
-                    statusBefore = "exited"
-                    issue = $null
-                })
+    # Even when bounded reconciliation fails, terminate every exact handle captured so far.
+    foreach ($record in @(
+            $Session.OwnedProcesses |
+                Where-Object { $_.owned -eq $true } |
+                Sort-Object depth -Descending
+        )) {
+        $recordKey = "$($record.pid):$($record.startTimeUtcTicks)"
+        if ($cleanupOutcomes.ContainsKey($recordKey)) {
             continue
         }
-        if ($state.status -ne "alive-owned") {
-            $null = $issues.Add("owned PID $($record.pid) was not safe for handle cleanup: $($state.status)")
-            $null = $waitResults.Add([pscustomobject]@{
-                    pid = [int]$record.pid
-                    killAttempted = $false
-                    waitCompleted = $false
-                    statusBefore = $state.status
-                    issue = $state.issue
-                })
-            continue
+        $outcome = Stop-ExactOwnedRecord -Session $Session -Record $record `
+            -TimeoutSeconds $HandleWaitTimeoutSeconds
+        $cleanupOutcomes[$recordKey] = $outcome
+        if ($outcome.killAttempted) {
+            $null = $fallbackAttemptedPids.Add([int]$outcome.pid)
         }
-        $Session.ForcedCleanup = $true
-        $null = $fallbackAttemptedPids.Add([int]$record.pid)
-        $waitCompleted = $false
-        $waitIssue = $null
-        try {
-            $record.process.Kill()
-            $waitCompleted = $record.process.WaitForExit($HandleWaitTimeoutSeconds * 1000)
-            if (-not $waitCompleted) {
-                $waitIssue = "exact retained PID $($record.pid) did not exit within $HandleWaitTimeoutSeconds seconds"
-                $null = $issues.Add($waitIssue)
-            }
+        if (-not [string]::IsNullOrWhiteSpace([string]$outcome.issue)) {
+            $null = $issues.Add($outcome.issue)
         }
-        catch {
-            $postState = Get-OwnedProcessState -Record $record
-            if ($postState.status -eq "alive-owned") {
-                $waitIssue = "exact retained PID $($record.pid) cleanup failed: $($_.Exception.Message)"
-                $null = $issues.Add($waitIssue)
-            }
-            elseif ($postState.status -eq "exited") {
-                $waitCompleted = $true
-            }
+    }
+
+    $waitResults = @()
+    foreach ($record in @(
+            $Session.OwnedProcesses |
+                Where-Object { $_.owned -eq $true } |
+                Sort-Object depth -Descending
+        )) {
+        $recordKey = "$($record.pid):$($record.startTimeUtcTicks)"
+        if ($cleanupOutcomes.ContainsKey($recordKey)) {
+            $waitResults += $cleanupOutcomes[$recordKey]
         }
-        $null = $waitResults.Add([pscustomobject]@{
-                pid = [int]$record.pid
-                killAttempted = $true
-                waitCompleted = $waitCompleted
-                statusBefore = $state.status
-                issue = $waitIssue
-            })
     }
     foreach ($observation in @($Session.OwnedProcesses | Where-Object { $_.owned -eq $false })) {
         if ($observation.observationStatus -eq "unverifiable-live") {
@@ -691,11 +788,11 @@ function Stop-ExactOwnedProcessTree {
     }
     $allCapturedExited = @($verification | Where-Object { $_.status -ne "exited" }).Count -eq 0 -and
         $verification.Count -gt 0
-    $treeKillSucceeded = $treeKill.pass -eq $true -and $treeKill.invoked -eq $true -and
-        $treeKill.waitCompleted -eq $true
-    $treeTerminationProven = $allCapturedExited -and ($discoveryComplete -or $treeKillSucceeded)
+    $treeTerminationProven = $allCapturedExited -and $discoveryComplete -and
+        $stableReconciliationPasses -ge $stableReconciliationPassesRequired
+    $Session.DiscoveryComplete = $treeTerminationProven
     if (-not $treeTerminationProven) {
-        $detail = if ($discoveryIssue) { $discoveryIssue } else { "descendant discovery was incomplete" }
+        $detail = if ($discoveryIssue) { $discoveryIssue } else { "stable post-exit reconciliation was incomplete" }
         $null = $issues.Add("exact process-tree exit could not be proven: $detail")
     }
     return [pscustomobject]@{
@@ -703,6 +800,9 @@ function Stop-ExactOwnedProcessTree {
         discoveryComplete = $discoveryComplete
         discoveryDeadlineUtc = $discoveryDeadline.ToString("o")
         discoveryIssue = $discoveryIssue
+        discoveryPasses = $discoveryPasses
+        stableReconciliationPassesRequired = $stableReconciliationPassesRequired
+        stableReconciliationPasses = $stableReconciliationPasses
         treeKill = $treeKill
         fallbackAttemptedPids = [int[]]@($fallbackAttemptedPids)
         waitResults = [object[]]@($waitResults)
@@ -896,6 +996,207 @@ function Resolve-ExistingPath {
     return (Resolve-Path -LiteralPath $Path).Path
 }
 
+function Complete-ProbeDiscovery {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry,
+        [Parameter(Mandatory = $true)]
+        [DateTime]$DeadlineUtc,
+        [ValidateRange(2, 10)]
+        [int]$StablePassesRequired = 2,
+        [ValidateRange(10, 1000)]
+        [int]$PollMilliseconds = 25
+    )
+
+    $rootExitObserved = $false
+    $discoveryScanCount = 0
+    $postExitReconciliationPasses = 0
+    $stablePassesObserved = 0
+    while ((Get-RemainingMilliseconds -Deadline $DeadlineUtc) -gt 0) {
+        $recordCountBefore = @($Session.OwnedProcesses).Count
+        $null = @(
+            Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry `
+                -DeadlineUtc $DeadlineUtc -IncludeExitedParents
+        )
+        $discoveryScanCount += 1
+
+        $launcherRecord = @(
+            $Session.OwnedProcesses | Where-Object {
+                $_.owned -eq $true -and $_.roles -contains "launcher"
+            }
+        ) | Select-Object -First 1
+        if ($null -eq $launcherRecord) {
+            throw "Probe discovery lost its exact launcher record."
+        }
+        $launcherState = Get-OwnedProcessState -Record $launcherRecord
+        if ($launcherState.status -eq "exited") {
+            $rootExitObserved = $true
+        }
+        elseif ($launcherState.status -ne "alive-owned") {
+            throw "Probe launcher identity became unverifiable during discovery: $($launcherState.status)"
+        }
+
+        $ownedStates = @(
+            $Session.OwnedProcesses |
+                Where-Object { $_.owned -eq $true } |
+                ForEach-Object { Get-OwnedProcessState -Record $_ }
+        )
+        $invalidStates = @(
+            $ownedStates | Where-Object { $_.status -ne "alive-owned" -and $_.status -ne "exited" }
+        )
+        if ($invalidStates.Count -gt 0) {
+            throw "Probe descendant identity became unverifiable during discovery."
+        }
+        $allOwnedExited = $ownedStates.Count -gt 0 -and @(
+            $ownedStates | Where-Object { $_.status -ne "exited" }
+        ).Count -eq 0
+
+        if ($rootExitObserved) {
+            $postExitReconciliationPasses += 1
+            $recordCountAfter = @($Session.OwnedProcesses).Count
+            if ($allOwnedExited -and $recordCountAfter -eq $recordCountBefore) {
+                $stablePassesObserved += 1
+            }
+            else {
+                $stablePassesObserved = 0
+            }
+        }
+        if ($rootExitObserved -and $stablePassesObserved -ge $StablePassesRequired) {
+            $Session.DiscoveryComplete = $true
+            return [pscustomobject]@{
+                pass = $true
+                rootExitObserved = $true
+                allOwnedExitedBeforeCleanup = $true
+                discoveryScanCount = $discoveryScanCount
+                postExitReconciliationPasses = $postExitReconciliationPasses
+                stablePassesRequired = $StablePassesRequired
+                stablePassesObserved = $stablePassesObserved
+            }
+        }
+
+        $remainingMilliseconds = Get-RemainingMilliseconds -Deadline $DeadlineUtc
+        if ($remainingMilliseconds -le 0) {
+            break
+        }
+        Start-Sleep -Milliseconds ([Math]::Min($PollMilliseconds, $remainingMilliseconds))
+    }
+    throw "Probe topology did not reach stable post-exit reconciliation before its absolute deadline."
+}
+
+function Get-ProbeTopologyEvidence {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session,
+        [Parameter(Mandatory = $true)]
+        [object]$Discovery,
+        [Parameter(Mandatory = $true)]
+        [bool]$ExpectedRuntimeChild
+    )
+
+    $ownedRecords = @($Session.OwnedProcesses | Where-Object { $_.owned -eq $true })
+    $launcherRecords = @($ownedRecords | Where-Object { $_.roles -contains "launcher" })
+    $pythonDescendants = @(
+        $ownedRecords | Where-Object {
+            $_.roles -notcontains "launcher" -and
+            ($_.imageName -ieq "python.exe" -or $_.imageName -ieq "pythonw.exe")
+        }
+    )
+    if ($ExpectedRuntimeChild -and $pythonDescendants.Count -eq 1) {
+        $pythonDescendants[0].roles = @($pythonDescendants[0].roles + @("runtime") | Select-Object -Unique)
+    }
+    elseif (-not $ExpectedRuntimeChild -and $launcherRecords.Count -eq 1) {
+        $launcherRecords[0].roles = @($launcherRecords[0].roles + @("runtime") | Select-Object -Unique)
+    }
+    $runtimeRecords = @($ownedRecords | Where-Object { $_.roles -contains "runtime" })
+
+    $recordsByPid = @{}
+    $exactIdentitiesComplete = $true
+    foreach ($record in $ownedRecords) {
+        if (
+            $null -eq $record.startTimeUtcTicks -or [long]$record.startTimeUtcTicks -le 0 -or
+            $null -eq $record.process
+        ) {
+            $exactIdentitiesComplete = $false
+        }
+        $recordsByPid[[string][int]$record.pid] = $record
+    }
+    $parentChainsRooted = $launcherRecords.Count -eq 1
+    if ($parentChainsRooted) {
+        [int]$launcherPid = $launcherRecords[0].pid
+        foreach ($record in $ownedRecords) {
+            if ([int]$record.pid -eq $launcherPid) {
+                if ([int]$record.parentPid -ne 0) {
+                    $parentChainsRooted = $false
+                }
+                continue
+            }
+            $visited = @{}
+            $current = $record
+            while ([int]$current.pid -ne $launcherPid) {
+                $currentKey = [string][int]$current.pid
+                if ($visited.ContainsKey($currentKey) -or [int]$current.parentPid -le 0) {
+                    $parentChainsRooted = $false
+                    break
+                }
+                $visited[$currentKey] = $true
+                $parentKey = [string][int]$current.parentPid
+                if (-not $recordsByPid.ContainsKey($parentKey)) {
+                    $parentChainsRooted = $false
+                    break
+                }
+                $current = $recordsByPid[$parentKey]
+            }
+            if (-not $parentChainsRooted) {
+                break
+            }
+        }
+    }
+
+    $allOwnedExitedBeforeCleanup = $ownedRecords.Count -gt 0
+    foreach ($record in $ownedRecords) {
+        if ((Get-OwnedProcessState -Record $record).status -ne "exited") {
+            $allOwnedExitedBeforeCleanup = $false
+        }
+    }
+    $observationCount = @($Session.OwnedProcesses | Where-Object { $_.owned -ne $true }).Count
+    $runtimeShapeMatches = $runtimeRecords.Count -eq 1
+    if ($runtimeShapeMatches -and $launcherRecords.Count -eq 1) {
+        $runtimeShapeMatches = if ($ExpectedRuntimeChild) {
+            [int]$runtimeRecords[0].pid -ne [int]$launcherRecords[0].pid -and $pythonDescendants.Count -eq 1
+        }
+        else {
+            [int]$runtimeRecords[0].pid -eq [int]$launcherRecords[0].pid -and $pythonDescendants.Count -eq 0
+        }
+    }
+    $pass = $Discovery.pass -eq $true -and $Discovery.rootExitObserved -eq $true -and
+        $Discovery.allOwnedExitedBeforeCleanup -eq $true -and
+        [int]$Discovery.stablePassesRequired -ge 2 -and
+        [int]$Discovery.stablePassesObserved -ge [int]$Discovery.stablePassesRequired -and
+        [int]$Discovery.postExitReconciliationPasses -ge [int]$Discovery.stablePassesRequired -and
+        $launcherRecords.Count -eq 1 -and $runtimeShapeMatches -and $parentChainsRooted -and
+        $exactIdentitiesComplete -and $allOwnedExitedBeforeCleanup -and $observationCount -eq 0
+
+    return [pscustomobject]@{
+        pass = $pass
+        criterion = "one exact launcher and one expected runtime role; every exact descendant parent chain rooted in the retained launcher; no observations; all exact processes exited; at least two unchanged post-exit reconciliations"
+        expectedRuntimeChild = $ExpectedRuntimeChild
+        launcherCount = $launcherRecords.Count
+        runtimeCount = $runtimeRecords.Count
+        parentChainsRooted = $parentChainsRooted
+        noUnverifiableObservations = $observationCount -eq 0
+        observationCount = $observationCount
+        rootExitObserved = $Discovery.rootExitObserved
+        allOwnedExitedBeforeCleanup = $allOwnedExitedBeforeCleanup
+        discoveryScanCount = $Discovery.discoveryScanCount
+        postExitReconciliationPasses = $Discovery.postExitReconciliationPasses
+        stablePassesRequired = $Discovery.stablePassesRequired
+        stablePassesObserved = $Discovery.stablePassesObserved
+    }
+}
+
 function Close-ProbeResources {
     param(
         [object]$Process = $null,
@@ -988,13 +1289,18 @@ function Invoke-PythonProbe {
     )
 
     $process = $null
+    $processStarted = $false
+    $localOwnershipEstablished = $false
     $stdoutTask = $null
     $stderrTask = $null
     $probeSession = $null
     $probeOwnedRecords = New-Object System.Collections.ArrayList
     $probeIdentity = $null
     $probeExitCode = $null
+    $probeDiscovery = $null
+    $probeTopology = $null
     $cleanupResult = $null
+    $retainedRootCleanup = $null
     $closeResult = $null
     $primaryException = $null
     $cleanupProblems = New-Object System.Collections.ArrayList
@@ -1013,9 +1319,7 @@ function Invoke-PythonProbe {
         if (-not $process.Start()) {
             throw "$FailureMessage The interpreter could not be started: $Executable"
         }
-        $process.EnableRaisingEvents = $true
-        $null = $process.Handle
-        $probeIdentity = Get-ExactProcessIdentity -Process $process
+        $processStarted = $true
         $probeSession = [pscustomobject]@{
             Backend = "probe"
             Index = 0
@@ -1026,6 +1330,10 @@ function Invoke-PythonProbe {
             ForcedCleanup = $false
             DiscoveryComplete = $false
         }
+        $localOwnershipEstablished = $true
+        $null = Initialize-ProbeOwnershipSession -Session $probeSession
+        Open-RetainedProcessHandle -Process $process
+        $probeIdentity = Get-ExactProcessIdentity -Process $process
         $null = Register-OwnedProcess -Session $probeSession -Process $process -Role "launcher" `
             -ParentPid 0 -Depth 0 -ImageName ([IO.Path]::GetFileName($Executable)) `
             -OwnedRegistry $probeOwnedRecords
@@ -1039,15 +1347,8 @@ function Invoke-PythonProbe {
         else {
             $deadline
         }
-        $null = @(
-            Sync-OwnedDescendants -Session $probeSession -OwnedRegistry $probeOwnedRecords `
-                -DeadlineUtc $discoveryDeadline
-        )
-        $probeSession.DiscoveryComplete = $true
-
-        if (-not (Wait-ProcessUntilDeadline -Process $process -Deadline $deadline)) {
-            throw "$FailureMessage The interpreter probe timed out."
-        }
+        $probeDiscovery = Complete-ProbeDiscovery -Session $probeSession -OwnedRegistry $probeOwnedRecords `
+            -DeadlineUtc $discoveryDeadline
         if (-not (Wait-TaskUntilDeadline -Task $stdoutTask -Deadline $deadline)) {
             throw "$FailureMessage The interpreter probe stdout drain timed out."
         }
@@ -1060,6 +1361,28 @@ function Invoke-PythonProbe {
         if ($probeExitCode -ne 0) {
             $detail = if ($stderr) { $stderr } else { "no diagnostic output" }
             throw "$FailureMessage Interpreter: $Executable. Details: $detail"
+        }
+        $probeParts = $stdout -split '\|', 3
+        if ($probeParts.Count -ne 3 -or ($probeParts[2] -ne "0" -and $probeParts[2] -ne "1")) {
+            throw "$FailureMessage Interpreter probe output omitted the runtime-topology marker."
+        }
+        $expectedRuntimeChild = $probeParts[2] -eq "1"
+        $probeTopology = Get-ProbeTopologyEvidence -Session $probeSession -Discovery $probeDiscovery `
+            -ExpectedRuntimeChild $expectedRuntimeChild
+        $probeSession.DiscoveryComplete = $probeTopology.pass -eq $true
+        $topologyEntries = @()
+        foreach ($record in @($probeSession.OwnedProcesses | Where-Object { $_.owned -eq $true })) {
+            $topologyEntries += [pscustomobject]@{
+                pid = [int]$record.pid
+                parentPid = [int]$record.parentPid
+                roles = @($record.roles)
+                startTimeUtc = [string]$record.startTimeUtc
+                startTimeUtcTicks = [long]$record.startTimeUtcTicks
+                status = (Get-OwnedProcessState -Record $record).status
+            }
+        }
+        if (-not (Test-ProbeTopologyComplete -Topology $probeTopology -OwnedEntries $topologyEntries)) {
+            throw "$FailureMessage Interpreter probe topology was not proven complete."
         }
     }
     catch {
@@ -1125,13 +1448,10 @@ function Invoke-PythonProbe {
                     }
                 }
                 else {
-                    $process.Refresh()
-                    if (-not $process.HasExited) {
-                        $process.Kill()
-                        $null = $process.WaitForExit($CleanupTimeoutSeconds * 1000)
-                    }
+                    $retainedRootCleanup = Stop-RetainedProcessHandle -Process $process `
+                        -TimeoutSeconds $CleanupTimeoutSeconds
                     $null = $cleanupProblems.Add(
-                        "probe launcher lacked exact start identity; retained-root fallback could not prove descendant exit"
+                        "probe exact topology was not established; retained-root cleanup pass=$($retainedRootCleanup.pass), waitCompleted=$($retainedRootCleanup.waitCompleted), exited=$($retainedRootCleanup.exited), issue=$($retainedRootCleanup.issue)"
                     )
                 }
             }
@@ -1139,8 +1459,20 @@ function Invoke-PythonProbe {
                 $null = $cleanupProblems.Add("exact probe-tree cleanup threw: $($_.Exception.Message)")
             }
         }
-        elseif ($null -ne $process) {
-            $null = $cleanupProblems.Add("probe process started without a local exact ownership session")
+        elseif ($processStarted -and $localOwnershipEstablished -and $null -ne $process) {
+            try {
+                $retainedRootCleanup = Stop-RetainedProcessHandle -Process $process `
+                    -TimeoutSeconds $CleanupTimeoutSeconds
+                $null = $cleanupProblems.Add(
+                    "probe local ownership session was unavailable; retained-root cleanup pass=$($retainedRootCleanup.pass), waitCompleted=$($retainedRootCleanup.waitCompleted), exited=$($retainedRootCleanup.exited), issue=$($retainedRootCleanup.issue)"
+                )
+            }
+            catch {
+                $null = $cleanupProblems.Add("retained-root probe cleanup threw: $($_.Exception.Message)")
+            }
+        }
+        elseif ($processStarted) {
+            $null = $cleanupProblems.Add("probe process started before local cleanup ownership could be recorded")
         }
 
         $drainDeadline = [DateTime]::UtcNow.AddSeconds($CleanupTimeoutSeconds)
@@ -1177,6 +1509,28 @@ function Invoke-PythonProbe {
         throw "$FailureMessage Probe cleanup failed: $(@($cleanupProblems) -join '; ')$primaryDetail"
     }
     if ($null -ne $primaryException) {
+        if ($processStarted) {
+            $cleanupPass = if ($null -ne $cleanupResult) {
+                $cleanupResult.pass
+            }
+            elseif ($null -ne $retainedRootCleanup) {
+                $retainedRootCleanup.pass
+            }
+            else {
+                $false
+            }
+            $waitComplete = if ($null -ne $cleanupResult) {
+                @($cleanupResult.waitResults | Where-Object { -not $_.waitCompleted }).Count -eq 0
+            }
+            elseif ($null -ne $retainedRootCleanup) {
+                $retainedRootCleanup.waitCompleted
+            }
+            else {
+                $false
+            }
+            $disposalPass = $null -ne $closeResult -and $closeResult.pass -eq $true
+            throw "$FailureMessage Probe failed after Start; cleanup pass=$cleanupPass, waitCompleted=$waitComplete, disposalPass=$disposalPass. Primary failure: $($primaryException.Message)"
+        }
         throw $primaryException
     }
     $ownedEntries = @()
@@ -1208,6 +1562,7 @@ function Invoke-PythonProbe {
         discoveryComplete = $cleanupResult.discoveryComplete
         ownedCount = $ownedEntries.Count
         ownedEntries = [object[]]@($ownedEntries)
+        topology = $probeTopology
         treeKill = $cleanupResult.treeKill
         fallbackAttemptedPids = [int[]]@($cleanupResult.fallbackAttemptedPids)
         waitResults = [object[]]@($cleanupResult.waitResults)
@@ -1277,6 +1632,87 @@ function Get-PythonRuntimeChild {
     throw "$($Session.Backend) session $($Session.Index) did not create the expected Python runtime child within 5 seconds."
 }
 
+function Register-ActiveSessionOwnership {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$Registry,
+        [Parameter(Mandatory = $true)]
+        [object]$Session
+    )
+
+    if (-not $Registry.Contains($Session)) {
+        $null = $Registry.Add($Session)
+    }
+}
+
+function Close-SessionStartResources {
+    param(
+        [object]$Session = $null,
+        [object]$Process = $null,
+        [AllowEmptyCollection()]
+        [object[]]$OwnedRecords = @()
+    )
+
+    $issues = New-Object System.Collections.ArrayList
+    if ($null -ne $Session -and $null -ne $Session.PSObject.Properties["StderrTask"] -and $null -ne $Session.StderrTask) {
+        try {
+            if (-not $Session.StderrTask.IsCompleted) {
+                $null = $issues.Add("measurement start stderr task was incomplete at disposal")
+            }
+            $Session.StderrTask.Dispose()
+        }
+        catch {
+            $null = $issues.Add("measurement start stderr task disposal failed: $($_.Exception.Message)")
+        }
+    }
+    if ($null -ne $Process) {
+        foreach ($streamName in @("StandardInput", "StandardOutput", "StandardError")) {
+            try {
+                if ($null -ne $Process.PSObject.Properties[$streamName] -and $null -ne $Process.$streamName) {
+                    $Process.$streamName.Dispose()
+                }
+            }
+            catch {
+                $null = $issues.Add("measurement start $streamName disposal failed: $($_.Exception.Message)")
+            }
+        }
+    }
+
+    $uniqueProcesses = New-Object System.Collections.ArrayList
+    foreach ($candidate in @(
+            @($OwnedRecords | Where-Object { $_.owned -eq $true -and $null -ne $_.process } | ForEach-Object { $_.process }) +
+            @($Process)
+        )) {
+        if ($null -eq $candidate) {
+            continue
+        }
+        $alreadyAdded = $false
+        foreach ($existing in @($uniqueProcesses)) {
+            if ([object]::ReferenceEquals($existing, $candidate)) {
+                $alreadyAdded = $true
+                break
+            }
+        }
+        if (-not $alreadyAdded) {
+            $null = $uniqueProcesses.Add($candidate)
+        }
+    }
+    foreach ($ownedProcess in @($uniqueProcesses)) {
+        try {
+            $ownedProcess.Dispose()
+        }
+        catch {
+            $null = $issues.Add("measurement start process-handle disposal failed: $($_.Exception.Message)")
+        }
+    }
+    return [pscustomobject]@{
+        pass = $issues.Count -eq 0
+        disposedProcessHandleCount = $uniqueProcesses.Count
+        issues = [object[]]@($issues)
+    }
+}
+
 function Start-McpSession {
     param(
         [Parameter(Mandatory = $true)]
@@ -1326,19 +1762,6 @@ function Start-McpSession {
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
-    $originalConsoleInputEncoding = [Console]::InputEncoding
-    try {
-        [Console]::InputEncoding = $utf8
-        $started = $process.Start()
-    }
-    finally {
-        [Console]::InputEncoding = $originalConsoleInputEncoding
-    }
-    if (-not $started) {
-        throw "Failed to start $Backend session $Index."
-    }
-    $process.EnableRaisingEvents = $true
-    $null = $process.Handle
     $session = [pscustomobject]@{
         Backend = $Backend
         Index = $Index
@@ -1384,12 +1807,33 @@ function Start-McpSession {
         RuntimeWaitCompleted = $false
         DiscoveryComplete = $false
     }
-    $null = $ProcessRegistry.Add($session)
-    $null = Register-OwnedProcess -Session $session -Process $process -Role "launcher" -ParentPid 0 -Depth 0 `
-        -ImageName ([IO.Path]::GetFileName($Executable)) `
-        -OwnedRegistry $OwnedRegistry
-    $session.StderrTask = $process.StandardError.ReadToEndAsync()
+    $processStarted = $false
+    $localOwnershipEstablished = $false
+    $startSucceeded = $false
+    $startFailure = $null
+    $startCleanup = $null
+    $startClose = $null
+    $originalConsoleInputEncoding = [Console]::InputEncoding
     try {
+        try {
+            [Console]::InputEncoding = $utf8
+            $started = $process.Start()
+        }
+        finally {
+            [Console]::InputEncoding = $originalConsoleInputEncoding
+        }
+        if (-not $started) {
+            throw "Failed to start $Backend session $Index."
+        }
+        $processStarted = $true
+        $localOwnershipEstablished = $true
+        Register-ActiveSessionOwnership -Registry $ProcessRegistry -Session $session
+        Open-RetainedProcessHandle -Process $process
+        $null = Get-ExactProcessIdentity -Process $process
+        $null = Register-OwnedProcess -Session $session -Process $process -Role "launcher" -ParentPid 0 -Depth 0 `
+            -ImageName ([IO.Path]::GetFileName($Executable)) `
+            -OwnedRegistry $OwnedRegistry
+        $session.StderrTask = $process.StandardError.ReadToEndAsync()
         if ($ExpectRuntimeChild) {
             $session.RuntimeProcess = Get-PythonRuntimeChild -Session $session -OwnedRegistry $OwnedRegistry
         }
@@ -1400,10 +1844,77 @@ function Start-McpSession {
                 -OwnedRegistry $OwnedRegistry
         }
         $session.DiscoveryComplete = $true
+        $startSucceeded = $true
     }
     catch {
-        $null = Stop-ExactOwnedProcessTree -Session $session -OwnedRegistry $OwnedRegistry
-        throw
+        $startFailure = $_.Exception
+    }
+    finally {
+        if ($processStarted -and $localOwnershipEstablished -and -not $startSucceeded) {
+            $launcherRecord = @(
+                $session.OwnedProcesses | Where-Object {
+                    $_.owned -eq $true -and $_.roles -contains "launcher"
+                }
+            ) | Select-Object -First 1
+            try {
+                if ($null -ne $launcherRecord) {
+                    $startCleanup = Stop-ExactOwnedProcessTree -Session $session -OwnedRegistry $OwnedRegistry
+                }
+                else {
+                    $startCleanup = Stop-RetainedProcessHandle -Process $process -TimeoutSeconds 5
+                    $null = $startCleanup.waitCompleted
+                    $null = $startCleanup.exited
+                }
+            }
+            catch {
+                $startCleanup = [pscustomobject]@{
+                    pass = $false
+                    waitCompleted = $false
+                    exited = $false
+                    issue = $_.Exception.Message
+                }
+            }
+            try {
+                $startClose = Close-SessionStartResources -Session $session -Process $process `
+                    -OwnedRecords @($session.OwnedProcesses)
+            }
+            catch {
+                $startClose = [pscustomobject]@{
+                    pass = $false
+                    issues = @($_.Exception.Message)
+                }
+            }
+            if ($ProcessRegistry.Contains($session)) {
+                $ProcessRegistry.Remove($session)
+            }
+        }
+    }
+    if ($null -ne $startFailure) {
+        $cleanupPass = $null -ne $startCleanup -and $startCleanup.pass -eq $true
+        $waitCompleted = if (
+            $null -ne $startCleanup -and $null -ne $startCleanup.PSObject.Properties["waitResults"]
+        ) {
+            @($startCleanup.waitResults | Where-Object { -not $_.waitCompleted }).Count -eq 0
+        }
+        elseif ($null -ne $startCleanup) {
+            $startCleanup.waitCompleted -eq $true
+        }
+        else {
+            $false
+        }
+        $exited = if (
+            $null -ne $startCleanup -and $null -ne $startCleanup.PSObject.Properties["verification"]
+        ) {
+            @($startCleanup.verification | Where-Object { $_.status -ne "exited" }).Count -eq 0
+        }
+        elseif ($null -ne $startCleanup) {
+            $startCleanup.exited -eq $true
+        }
+        else {
+            $false
+        }
+        $closePass = $null -ne $startClose -and $startClose.pass -eq $true
+        throw "$Backend session $Index failed after Start; cleanup pass=$cleanupPass, waitCompleted=$waitCompleted, exited=$exited, disposalPass=$closePass. Primary failure: $($startFailure.Message)"
     }
     return $session
 }
@@ -1885,6 +2396,117 @@ function Test-SessionExitCodesComplete {
     return $true
 }
 
+function Test-ProbeTopologyComplete {
+    param(
+        [object]$Topology,
+        [AllowEmptyCollection()]
+        [object[]]$OwnedEntries = @()
+    )
+
+    if ($null -eq $Topology) {
+        return $false
+    }
+    foreach ($name in @(
+            "pass", "criterion", "expectedRuntimeChild", "launcherCount", "runtimeCount",
+            "parentChainsRooted", "noUnverifiableObservations", "observationCount", "rootExitObserved",
+            "allOwnedExitedBeforeCleanup", "discoveryScanCount", "postExitReconciliationPasses",
+            "stablePassesRequired", "stablePassesObserved"
+        )) {
+        if (-not (Test-ObjectProperty -InputObject $Topology -Name $name) -or $null -eq $Topology.$name) {
+            return $false
+        }
+    }
+    foreach ($name in @(
+            "launcherCount", "runtimeCount", "observationCount", "discoveryScanCount",
+            "postExitReconciliationPasses", "stablePassesRequired", "stablePassesObserved"
+        )) {
+        if (-not ($Topology.$name -is [int]) -or [int]$Topology.$name -lt 0) {
+            return $false
+        }
+    }
+    if (
+        $Topology.pass -ne $true -or
+        [string]::IsNullOrWhiteSpace([string]$Topology.criterion) -or
+        -not ($Topology.expectedRuntimeChild -is [bool]) -or
+        $Topology.parentChainsRooted -ne $true -or
+        $Topology.noUnverifiableObservations -ne $true -or
+        [int]$Topology.observationCount -ne 0 -or
+        $Topology.rootExitObserved -ne $true -or
+        $Topology.allOwnedExitedBeforeCleanup -ne $true -or
+        [int]$Topology.discoveryScanCount -lt 2 -or
+        [int]$Topology.stablePassesRequired -lt 2 -or
+        [int]$Topology.stablePassesObserved -lt [int]$Topology.stablePassesRequired -or
+        [int]$Topology.postExitReconciliationPasses -lt [int]$Topology.stablePassesRequired
+    ) {
+        return $false
+    }
+
+    $entries = @($OwnedEntries)
+    $launcherEntries = @($entries | Where-Object { @($_.roles) -contains "launcher" })
+    $runtimeEntries = @($entries | Where-Object { @($_.roles) -contains "runtime" })
+    if (
+        $entries.Count -eq 0 -or
+        $launcherEntries.Count -ne 1 -or
+        $runtimeEntries.Count -ne 1 -or
+        [int]$Topology.launcherCount -ne $launcherEntries.Count -or
+        [int]$Topology.runtimeCount -ne $runtimeEntries.Count
+    ) {
+        return $false
+    }
+    foreach ($entry in $entries) {
+        if (
+            $null -eq $entry -or
+            -not ($entry.pid -is [int]) -or [int]$entry.pid -le 0 -or
+            -not ($entry.parentPid -is [int]) -or
+            @($entry.roles).Count -eq 0 -or
+            [string]::IsNullOrWhiteSpace([string]$entry.startTimeUtc) -or
+            -not ($entry.startTimeUtcTicks -is [long]) -or [long]$entry.startTimeUtcTicks -le 0 -or
+            [string]$entry.status -ne "exited"
+        ) {
+            return $false
+        }
+    }
+    [int]$launcherPid = $launcherEntries[0].pid
+    if (
+        ([bool]$Topology.expectedRuntimeChild -and [int]$runtimeEntries[0].pid -eq $launcherPid) -or
+        (-not [bool]$Topology.expectedRuntimeChild -and [int]$runtimeEntries[0].pid -ne $launcherPid)
+    ) {
+        return $false
+    }
+
+    $entriesByPid = @{}
+    foreach ($entry in $entries) {
+        $key = [string][int]$entry.pid
+        if ($entriesByPid.ContainsKey($key)) {
+            return $false
+        }
+        $entriesByPid[$key] = $entry
+    }
+    foreach ($entry in $entries) {
+        if ([int]$entry.pid -eq $launcherPid) {
+            if ([int]$entry.parentPid -ne 0) {
+                return $false
+            }
+            continue
+        }
+        $visited = @{}
+        $current = $entry
+        while ([int]$current.pid -ne $launcherPid) {
+            $currentKey = [string][int]$current.pid
+            if ($visited.ContainsKey($currentKey) -or [int]$current.parentPid -le 0) {
+                return $false
+            }
+            $visited[$currentKey] = $true
+            $parentKey = [string][int]$current.parentPid
+            if (-not $entriesByPid.ContainsKey($parentKey)) {
+                return $false
+            }
+            $current = $entriesByPid[$parentKey]
+        }
+    }
+    return $true
+}
+
 function Test-ProbeLifecycleComplete {
     param([object]$Lifecycle)
 
@@ -1893,7 +2515,7 @@ function Test-ProbeLifecycleComplete {
     }
     foreach ($name in @(
             "pass", "exitCode", "forcedCleanup", "discoveryComplete", "ownedCount", "ownedEntries",
-            "treeKill", "fallbackAttemptedPids", "waitResults", "verification", "resourceDisposal"
+            "topology", "treeKill", "fallbackAttemptedPids", "waitResults", "verification", "resourceDisposal"
         )) {
         if (-not (Test-ObjectProperty -InputObject $Lifecycle -Name $name) -or $null -eq $Lifecycle.$name) {
             return $false
@@ -1917,6 +2539,7 @@ function Test-ProbeLifecycleComplete {
     $waitResults = @($Lifecycle.waitResults)
     $verification = @($Lifecycle.verification)
     if (
+        -not (Test-ProbeTopologyComplete -Topology $Lifecycle.topology -OwnedEntries $ownedEntries) -or
         $ownedEntries.Count -ne [int]$Lifecycle.ownedCount -or
         $waitResults.Count -ne $ownedEntries.Count -or
         $verification.Count -ne $ownedEntries.Count -or
@@ -2960,6 +3583,7 @@ function New-MarkdownSummary {
     $null = $lines.Add("")
     $probeFallback = if (@($Evidence.probeLifecycle.fallbackAttemptedPids).Count) { @($Evidence.probeLifecycle.fallbackAttemptedPids) -join ", " } else { "none" }
     $null = $lines.Add("- Exit code: ``$($Evidence.probeLifecycle.exitCode)``; exact identities: ``$($Evidence.probeLifecycle.ownedCount)``; discovery complete: ``$($Evidence.probeLifecycle.discoveryComplete)``; forced cleanup: ``$($Evidence.probeLifecycle.forcedCleanup)``.")
+    $null = $lines.Add("- Topology completeness criterion: $($Evidence.probeLifecycle.topology.criterion); stable post-exit reconciliations: ``$($Evidence.probeLifecycle.topology.stablePassesObserved)``/``$($Evidence.probeLifecycle.topology.stablePassesRequired)``; rooted parent chains: ``$($Evidence.probeLifecycle.topology.parentChainsRooted)``; observations: ``$($Evidence.probeLifecycle.topology.observationCount)``.")
     $null = $lines.Add("- Tree cleanup pass/invoked/wait: ``$($Evidence.probeLifecycle.treeKill.pass)``/``$($Evidence.probeLifecycle.treeKill.invoked)``/``$($Evidence.probeLifecycle.treeKill.waitCompleted)``; retained-handle fallback PIDs: ``$probeFallback``.")
     $null = $lines.Add("- Bounded waits: ``$(@($Evidence.probeLifecycle.waitResults).Count)``; exact exit verifications: ``$(@($Evidence.probeLifecycle.verification).Count)``; disposed unique process handles: ``$($Evidence.probeLifecycle.resourceDisposal.disposedProcessHandleCount)``; pass: ``$($Evidence.probeLifecycle.pass)``.")
     $null = $lines.Add("")
@@ -3083,7 +3707,7 @@ $integrity = Get-EvidenceIntegrity -WorkingDirectory $repoRootPath -ScriptPath $
 $startedAtUtc = [DateTime]::UtcNow
 try {
     $probe = Invoke-PythonProbe -Executable $pythonExecutable `
-        -Code "import fastmcp, os, platform, sys; print(platform.python_version() + '|' + str(getattr(fastmcp, '__version__', 'unknown')) + '|' + ('1' if os.path.normcase(sys.executable) != os.path.normcase(getattr(sys, '_base_executable', sys.executable)) else '0'))" `
+        -Code "import fastmcp, os, platform, sys, time; print(platform.python_version() + '|' + str(getattr(fastmcp, '__version__', 'unknown')) + '|' + ('1' if os.path.normcase(sys.executable) != os.path.normcase(getattr(sys, '_base_executable', sys.executable)) else '0'), flush=True); time.sleep(1)" `
         -FailureMessage "FastMCP is required for the comparison. Install the project server extra into the selected interpreter."
     $probeLifecycle = $probe.cleanup
     $probeParts = ([string]$probe.output) -split '\|', 3
@@ -3168,7 +3792,7 @@ try {
     $pidRecheckPath = Join-Path $outputPath "task-7-pid-recheck-$timestamp.json"
 
     $evidence = [pscustomobject]@{
-        schemaVersion = 4
+        schemaVersion = 5
         generatedAtUtc = [DateTime]::UtcNow.ToString("o")
         durationSeconds = [Math]::Round(([DateTime]::UtcNow - $startedAtUtc).TotalSeconds, 3)
         integrity = $integrity
