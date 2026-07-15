@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,59 @@ ROOT = Path(__file__).resolve().parents[1]
 MEASUREMENT_SCRIPT = ROOT / "scripts" / "measure_lite_sessions.ps1"
 SESSION_COUNT = 6
 CYCLE_COUNT = 10
+
+
+def powershell_path() -> str:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    assert powershell is not None
+    return powershell
+
+
+def run_measurement_function_probe(
+    functions: list[str],
+    body: str,
+    *,
+    extra_env: dict[str, str] | None = None,
+    timeout: int = 10,
+) -> subprocess.CompletedProcess[str]:
+    loader = r"""
+Set-StrictMode -Version Latest
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $env:TASK7_MEASUREMENT_SCRIPT,
+    [ref]$tokens,
+    [ref]$parseErrors
+)
+if (@($parseErrors).Count -ne 0) {
+    throw (@($parseErrors | ForEach-Object { $_.Message }) -join "; ")
+}
+$definitions = @($ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+}, $true))
+foreach ($functionName in @($env:TASK7_FUNCTIONS -split ',')) {
+    $definition = @($definitions | Where-Object { $_.Name -eq $functionName })
+    if ($definition.Count -ne 1) {
+        throw "Expected exactly one function named '$functionName'; found $($definition.Count)."
+    }
+    Invoke-Expression $definition[0].Extent.Text
+}
+"""
+    env = os.environ.copy()
+    env["TASK7_MEASUREMENT_SCRIPT"] = str(MEASUREMENT_SCRIPT)
+    env["TASK7_FUNCTIONS"] = ",".join(functions)
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [powershell_path(), "-NoProfile", "-NonInteractive", "-Command", loader + body],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        timeout=timeout,
+        check=False,
+    )
 
 
 def lite_environment() -> dict[str, str]:
@@ -112,6 +166,22 @@ def communicate_with_lite(process: subprocess.Popen[str], payload: str) -> tuple
     return process.communicate(payload, timeout=20)
 
 
+def terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    else:
+        process.kill()
+    process.wait(timeout=5)
+
+
 def run_lite_sessions(payloads: list[str]) -> list[subprocess.CompletedProcess[str]]:
     processes = [start_lite() for _ in payloads]
     try:
@@ -138,8 +208,7 @@ def run_lite_sessions(payloads: list[str]) -> list[subprocess.CompletedProcess[s
     finally:
         for process in processes:
             if process.poll() is None:
-                process.kill()
-                process.wait(timeout=5)
+                terminate_process_tree(process)
 
 
 def assert_successful_tool_response(response: dict[str, Any]) -> dict[str, Any]:
@@ -282,8 +351,6 @@ def test_measurement_script_has_machine_neutral_defaults_and_valid_powershell_sy
     assert ".config\\opencode" not in lowered_source
     assert "$env:EVERYTHING_SDK_DLL" in source
 
-    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
-    assert powershell is not None
     probe = r"""
 $tokens = $null
 $parseErrors = $null
@@ -307,7 +374,7 @@ foreach ($parameter in $ast.ParamBlock.Parameters) {
     env = os.environ.copy()
     env["TASK7_MEASUREMENT_SCRIPT"] = str(MEASUREMENT_SCRIPT)
     completed = subprocess.run(
-        [powershell, "-NoProfile", "-NonInteractive", "-Command", probe],
+        [powershell_path(), "-NoProfile", "-NonInteractive", "-Command", probe],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -339,12 +406,10 @@ foreach ($parameter in $ast.ParamBlock.Parameters) {
 
 
 def test_measurement_script_resolves_default_repo_before_clear_sdk_preflight_failure(tmp_path: Path) -> None:
-    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
-    assert powershell is not None
     missing_sdk = tmp_path / "missing Everything64.dll"
     completed = subprocess.run(
         [
-            powershell,
+            powershell_path(),
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
@@ -367,3 +432,287 @@ def test_measurement_script_resolves_default_repo_before_clear_sdk_preflight_fai
     assert completed.returncode != 0
     assert "Everything SDK DLL does not exist as a leaf" in output
     assert "PSScriptRoot" not in output
+
+
+def test_measurement_script_uses_one_absolute_deadline_across_notifications(tmp_path: Path) -> None:
+    helper = tmp_path / "delayed_protocol.py"
+    helper.write_text(
+        """\
+import json
+import time
+
+for index in range(8):
+    print(json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"index": index}}), flush=True)
+    time.sleep(0.2)
+print(json.dumps({"jsonrpc": "2.0", "id": "expected", "result": {}}), flush=True)
+""",
+        encoding="utf-8",
+    )
+    body = r"""
+$startInfo = New-Object System.Diagnostics.ProcessStartInfo
+$startInfo.FileName = $env:TASK7_PYTHON
+$startInfo.Arguments = '"' + $env:TASK7_PROTOCOL_HELPER + '"'
+$startInfo.WorkingDirectory = $env:TASK7_REPO_ROOT
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.RedirectStandardInput = $true
+$startInfo.RedirectStandardOutput = $true
+$startInfo.RedirectStandardError = $true
+$process = New-Object System.Diagnostics.Process
+$process.StartInfo = $startInfo
+$null = $process.Start()
+$session = [pscustomobject]@{
+    Backend = 'deadline-test'
+    Index = 1
+    Process = $process
+    Notifications = New-Object System.Collections.ArrayList
+    SeenIds = New-Object 'System.Collections.Generic.HashSet[string]'
+}
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+$timedOut = $false
+try {
+    $null = Receive-MatchingResponse -Session $session -ExpectedId 'expected' -TimeoutSeconds 1
+}
+catch {
+    $timedOut = $_.Exception.Message -like '*Timed out waiting*'
+}
+finally {
+    $watch.Stop()
+    if (-not $process.HasExited) {
+        $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+        & $taskkill /PID $process.Id /T /F *> $null
+        $null = $process.WaitForExit(5000)
+    }
+}
+[pscustomobject]@{
+    timedOut = $timedOut
+    elapsedMilliseconds = $watch.ElapsedMilliseconds
+    notifications = $session.Notifications.Count
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(
+        ["Test-ObjectProperty", "Assert-ValidNotification", "Get-RemainingMilliseconds", "Receive-MatchingResponse"],
+        body,
+        extra_env={
+            "TASK7_PYTHON": sys.executable,
+            "TASK7_PROTOCOL_HELPER": str(helper),
+            "TASK7_REPO_ROOT": str(ROOT),
+        },
+        timeout=8,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["timedOut"] is True
+    assert 700 <= result["elapsedMilliseconds"] < 1800
+    assert result["notifications"] >= 3
+
+
+def test_measurement_script_rejects_malformed_notifications() -> None:
+    body = r"""
+$valid = @(
+    '{"jsonrpc":"2.0","method":"notifications/progress","params":{}}'
+)
+$invalid = @(
+    '{"jsonrpc":"1.0","method":"notifications/progress"}',
+    '{"jsonrpc":"2.0","method":""}',
+    '{"jsonrpc":"2.0","method":"notifications/progress","id":1}',
+    '{"jsonrpc":"2.0","method":"notifications/progress","result":{}}',
+    '{"jsonrpc":"2.0","method":"notifications/progress","error":{}}',
+    '{"jsonrpc":"2.0","method":"notifications/progress","params":[]}',
+    '{"jsonrpc":"2.0","method":"notifications/progress","params":null}'
+)
+$accepted = 0
+$rejected = 0
+foreach ($line in $valid) {
+    Assert-ValidNotification -Message ($line | ConvertFrom-Json) -Context 'test'
+    $accepted += 1
+}
+foreach ($line in $invalid) {
+    try {
+        Assert-ValidNotification -Message ($line | ConvertFrom-Json) -Context 'test'
+    }
+    catch {
+        $rejected += 1
+    }
+}
+[pscustomobject]@{ accepted = $accepted; rejected = $rejected } | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(["Test-ObjectProperty", "Assert-ValidNotification"], body)
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"accepted": 1, "rejected": 7}
+
+
+def test_measurement_script_bounds_async_pipe_drains() -> None:
+    source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    assert ".StandardOutput.ReadToEnd()" not in source
+    assert re.search(r"\.Wait\(\s*\)", source) is None
+
+    body = r"""
+$task = [System.Threading.Tasks.Task]::Delay(5000)
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+$completed = Wait-TaskUntilDeadline -Task $task -Deadline ([DateTime]::UtcNow.AddMilliseconds(150))
+$watch.Stop()
+[pscustomobject]@{
+    completed = $completed
+    elapsedMilliseconds = $watch.ElapsedMilliseconds
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(["Get-RemainingMilliseconds", "Wait-TaskUntilDeadline"], body)
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["completed"] is False
+    assert 75 <= result["elapsedMilliseconds"] < 1000
+
+
+def test_measurement_script_owns_and_cleans_only_exact_process_trees() -> None:
+    measurement_source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    test_source = Path(__file__).read_text(encoding="utf-8")
+    lowered = measurement_source.lower()
+
+    for function_name in (
+        "Register-OwnedProcess",
+        "Sync-OwnedDescendants",
+        "Stop-ExactOwnedProcessTree",
+        "Invoke-OwnedPidAudit",
+    ):
+        assert f"function {function_name}" in measurement_source
+    assert "RuntimeProcess = $null" in measurement_source
+    assert re.search(r"(?m)^\s*RuntimeProcess = \$process\s*$", measurement_source) is None
+    assert "taskkill.exe" in lowered
+    assert "/pid" in lowered
+    assert "/t" in lowered
+    assert "/im" not in lowered
+    assert "get-process -name" not in lowered
+    assert "stop-process -name" not in lowered
+    assert "def terminate_process_tree" in test_source
+    assert '"taskkill.exe", "/PID", str(process.pid), "/T", "/F"' in test_source
+
+
+def test_measurement_script_does_not_bind_the_read_only_pid_automatic_variable() -> None:
+    source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    register_function = re.search(
+        r"function Register-OwnedProcess\s*\{(?P<body>.*?)\n\}",
+        source,
+        flags=re.DOTALL,
+    )
+    assert register_function is not None
+    assert re.search(r"(?i)\[int\]\$pid\b", register_function.group("body")) is None
+
+
+def test_measurement_script_accepts_an_initially_empty_owned_process_registry() -> None:
+    body = r"""
+$registry = New-Object System.Collections.ArrayList
+$session = [pscustomobject]@{
+    Backend = 'registry-test'
+    Index = 1
+    OwnedProcesses = New-Object System.Collections.ArrayList
+}
+$process = [System.Diagnostics.Process]::GetCurrentProcess()
+$record = Register-OwnedProcess -Session $session -Process $process -CimProcess $null `
+    -ProcessId $process.Id -Role 'launcher' -OwnedRegistry $registry
+$record.startTimeUtc = ([DateTime]::Parse($record.startTimeUtc).AddMilliseconds(-0.5)).ToString('o')
+$sameRecord = Register-OwnedProcess -Session $session -Process $process -CimProcess $null `
+    -ProcessId $process.Id -Role 'runtime' -OwnedRegistry $registry
+[pscustomobject]@{
+    registryCount = $registry.Count
+    sessionCount = $session.OwnedProcesses.Count
+    pid = $sameRecord.pid
+    roles = @($sameRecord.roles)
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(
+        ["Get-ProcessStartTimeUtc", "Register-OwnedProcess"],
+        body,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["registryCount"] == 1
+    assert result["sessionCount"] == 1
+    assert result["pid"] > 0
+    assert set(result["roles"]) == {"launcher", "runtime"}
+
+
+def test_measurement_evidence_contract_fails_closed_on_exit_codes_and_pid_audit() -> None:
+    source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    for field in (
+        "scriptSha256",
+        "gitHead",
+        "gitTree",
+        "responseDeadlineMode",
+        "exitCodesComplete",
+        "processAudit",
+        "overallComponents",
+    ):
+        assert field in source
+
+    body = r"""
+$session = [pscustomobject]@{ launcherExitCode = [int]0; runtimeExitCode = [int]0 }
+$validExitCodes = Test-SessionExitCodesComplete -SessionEvidence $session
+$session.runtimeExitCode = $null
+$nullRuntimeFails = -not (Test-SessionExitCodesComplete -SessionEvidence $session)
+$session.runtimeExitCode = [int]1
+$nonzeroRuntimeFails = -not (Test-SessionExitCodesComplete -SessionEvidence $session)
+
+$validAudit = [pscustomobject]@{
+    pass = $true
+    checkedPids = @(101, 102)
+    alivePids = @()
+    entries = @(
+        [pscustomobject]@{ pid = 101; status = 'exited' },
+        [pscustomobject]@{ pid = 102; status = 'exited' }
+    )
+}
+$validPidAudit = Test-ProcessAuditComplete -Audit $validAudit
+$validAudit.alivePids = @(102)
+$alivePidFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
+$validAudit.alivePids = @()
+$validAudit.checkedPids = $null
+$missingAuditFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
+
+$components = [pscustomobject]@{
+    liteProtocolAccountingCleanup = $true
+    fastMcpProtocolAccountingCleanup = $true
+    postRunPidAudit = $true
+    exitCodeCompleteness = $true
+    memoryStability = $true
+    liteFastMcpIdleRatio = $true
+    evidenceIntegrity = $true
+}
+$validOverall = Test-AllExplicitPassComponents -Components $components
+$components.postRunPidAudit = $null
+$missingOverallFails = -not (Test-AllExplicitPassComponents -Components $components)
+
+[pscustomobject]@{
+    validExitCodes = $validExitCodes
+    nullRuntimeFails = $nullRuntimeFails
+    nonzeroRuntimeFails = $nonzeroRuntimeFails
+    validPidAudit = $validPidAudit
+    alivePidFails = $alivePidFails
+    missingAuditFails = $missingAuditFails
+    validOverall = $validOverall
+    missingOverallFails = $missingOverallFails
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(
+        [
+            "Test-ObjectProperty",
+            "Test-SessionExitCodesComplete",
+            "Test-ProcessAuditComplete",
+            "Test-AllExplicitPassComponents",
+        ],
+        body,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert all(json.loads(completed.stdout).values())
+
+
+def test_owned_task7_files_contain_no_personal_machine_paths() -> None:
+    combined = MEASUREMENT_SCRIPT.read_text(encoding="utf-8") + Path(__file__).read_text(encoding="utf-8")
+    lowered = combined.lower()
+    assert "c:\\users\\" not in lowered
+    assert "jmt" + "fam" not in lowered

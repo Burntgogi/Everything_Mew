@@ -36,6 +36,7 @@ $ExpectedToolNames = @(
     "everything_syntax_help"
 )
 $ActiveSessions = New-Object System.Collections.ArrayList
+$OwnedProcessRecords = New-Object System.Collections.ArrayList
 
 function Test-ObjectProperty {
     param(
@@ -46,6 +47,398 @@ function Test-ObjectProperty {
     )
 
     return $null -ne $InputObject.PSObject.Properties[$Name]
+}
+
+function Get-RemainingMilliseconds {
+    param(
+        [Parameter(Mandatory = $true)]
+        [DateTime]$Deadline
+    )
+
+    [double]$remaining = ($Deadline - [DateTime]::UtcNow).TotalMilliseconds
+    if ($remaining -le 0) {
+        return 0
+    }
+    return [int][Math]::Min([int]::MaxValue, [Math]::Ceiling($remaining))
+}
+
+function Wait-TaskUntilDeadline {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Threading.Tasks.Task]$Task,
+        [Parameter(Mandatory = $true)]
+        [DateTime]$Deadline
+    )
+
+    if ($Task.IsCompleted) {
+        return $true
+    }
+    $remainingMilliseconds = Get-RemainingMilliseconds -Deadline $Deadline
+    if ($remainingMilliseconds -le 0) {
+        return $false
+    }
+    return $Task.Wait($remainingMilliseconds)
+}
+
+function Wait-ProcessUntilDeadline {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)]
+        [DateTime]$Deadline
+    )
+
+    $Process.Refresh()
+    if ($Process.HasExited) {
+        return $true
+    }
+    $remainingMilliseconds = Get-RemainingMilliseconds -Deadline $Deadline
+    if ($remainingMilliseconds -le 0) {
+        return $false
+    }
+    return $Process.WaitForExit($remainingMilliseconds)
+}
+
+function Get-ProcessStartTimeUtc {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [object]$CimProcess
+    )
+
+    if ($null -ne $Process) {
+        try {
+            return $Process.StartTime.ToUniversalTime().ToString("o")
+        }
+        catch {
+            # A very short-lived descendant can disappear before its Process handle is opened.
+        }
+    }
+    if ($null -ne $CimProcess -and $null -ne $CimProcess.CreationDate) {
+        try {
+            $created = if ($CimProcess.CreationDate -is [DateTime]) {
+                [DateTime]$CimProcess.CreationDate
+            }
+            else {
+                [Management.ManagementDateTimeConverter]::ToDateTime([string]$CimProcess.CreationDate)
+            }
+            return $created.ToUniversalTime().ToString("o")
+        }
+        catch {
+            return $null
+        }
+    }
+    return $null
+}
+
+function Register-OwnedProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session,
+        [System.Diagnostics.Process]$Process,
+        [object]$CimProcess,
+        [Parameter(Mandatory = $true)]
+        [int]$ProcessId,
+        [Parameter(Mandatory = $true)]
+        [string]$Role,
+        [int]$ParentPid = 0,
+        [int]$Depth = 0,
+        [string]$ImageName = "",
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry
+    )
+
+    $startTimeUtc = Get-ProcessStartTimeUtc -Process $Process -CimProcess $CimProcess
+    $existing = @(
+        $OwnedRegistry | Where-Object {
+            if ($_.pid -ne $ProcessId -or $_.backend -ne $Session.Backend -or $_.session -ne $Session.Index) {
+                return $false
+            }
+            if (
+                [string]::IsNullOrWhiteSpace([string]$startTimeUtc) -or
+                [string]::IsNullOrWhiteSpace([string]$_.startTimeUtc)
+            ) {
+                return $true
+            }
+            try {
+                $recorded = [DateTime]::Parse([string]$_.startTimeUtc).ToUniversalTime()
+                $observed = [DateTime]::Parse([string]$startTimeUtc).ToUniversalTime()
+                return [Math]::Abs(($recorded - $observed).TotalMilliseconds) -le 1000
+            }
+            catch {
+                return $false
+            }
+        }
+    ) | Select-Object -First 1
+    if ($null -ne $existing) {
+        if ($null -ne $Process -and $null -eq $existing.process) {
+            $existing.process = $Process
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$existing.startTimeUtc) -and $null -ne $startTimeUtc) {
+            $existing.startTimeUtc = $startTimeUtc
+        }
+        $existing.roles = @($existing.roles + @($Role) | Select-Object -Unique)
+        if (-not @($Session.OwnedProcesses | Where-Object { $_ -eq $existing }).Count) {
+            $null = $Session.OwnedProcesses.Add($existing)
+        }
+        return $existing
+    }
+
+    if (($Role -eq "launcher" -or $Role -eq "runtime") -and [string]::IsNullOrWhiteSpace([string]$startTimeUtc)) {
+        throw "$($Session.Backend) session $($Session.Index) could not capture start-time identity for $Role PID $ProcessId."
+    }
+    $record = [pscustomobject]@{
+        backend = $Session.Backend
+        session = $Session.Index
+        pid = $ProcessId
+        parentPid = $ParentPid
+        depth = $Depth
+        imageName = $ImageName
+        roles = @($Role)
+        startTimeUtc = $startTimeUtc
+        discoveredAtUtc = [DateTime]::UtcNow.ToString("o")
+        process = $Process
+    }
+    $null = $OwnedRegistry.Add($record)
+    $null = $Session.OwnedProcesses.Add($record)
+    return $record
+}
+
+function Sync-OwnedDescendants {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry,
+        [switch]$BestEffort
+    )
+
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue([pscustomobject]@{ pid = [int]$Session.Process.Id; depth = 0 })
+    $visited = @{}
+    $discovered = New-Object System.Collections.ArrayList
+    while ($queue.Count -gt 0) {
+        $parent = $queue.Dequeue()
+        if ($visited.ContainsKey([string]$parent.pid)) {
+            continue
+        }
+        $visited[[string]$parent.pid] = $true
+        try {
+            $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($parent.pid)" -ErrorAction Stop)
+        }
+        catch {
+            if ($BestEffort) {
+                continue
+            }
+            throw "$($Session.Backend) session $($Session.Index) could not enumerate exact descendants of PID $($parent.pid): $($_.Exception.Message)"
+        }
+        foreach ($child in $children) {
+            [int]$childPid = $child.ProcessId
+            $record = Register-OwnedProcess -Session $Session -Process $null -CimProcess $child -ProcessId $childPid `
+                -Role "descendant" -ParentPid ([int]$parent.pid) -Depth ([int]$parent.depth + 1) `
+                -ImageName ([string]$child.Name) -OwnedRegistry $OwnedRegistry
+            if ($null -eq $record.process) {
+                try {
+                    $childProcess = [System.Diagnostics.Process]::GetProcessById($childPid)
+                    $childProcess.EnableRaisingEvents = $true
+                    $null = $childProcess.Handle
+                    $record.process = $childProcess
+                }
+                catch {
+                    # The PID remains recorded even if the process exits before its handle is retained.
+                }
+            }
+            $null = $discovered.Add($record)
+            $queue.Enqueue([pscustomobject]@{ pid = $childPid; depth = [int]$parent.depth + 1 })
+        }
+    }
+    return @($discovered)
+}
+
+function Get-OwnedProcessState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Record
+    )
+
+    try {
+        $current = @(Get-CimInstance Win32_Process -Filter "ProcessId = $($Record.pid)" -ErrorAction Stop)
+    }
+    catch {
+        return [pscustomobject]@{
+            status = "unreadable"
+            alive = $null
+            currentStartTimeUtc = $null
+            issue = $_.Exception.Message
+        }
+    }
+    if ($current.Count -eq 0) {
+        return [pscustomobject]@{
+            status = "exited"
+            alive = $false
+            currentStartTimeUtc = $null
+            issue = $null
+        }
+    }
+
+    $currentStartTimeUtc = Get-ProcessStartTimeUtc -Process $null -CimProcess $current[0]
+    if (
+        [string]::IsNullOrWhiteSpace([string]$Record.startTimeUtc) -or
+        [string]::IsNullOrWhiteSpace([string]$currentStartTimeUtc)
+    ) {
+        return [pscustomobject]@{
+            status = "unreadable"
+            alive = $null
+            currentStartTimeUtc = $currentStartTimeUtc
+            issue = "start-time identity was unavailable"
+        }
+    }
+    $recordedTime = [DateTime]::Parse([string]$Record.startTimeUtc).ToUniversalTime()
+    $currentTime = [DateTime]::Parse([string]$currentStartTimeUtc).ToUniversalTime()
+    if ([Math]::Abs(($recordedTime - $currentTime).TotalMilliseconds) -gt 1000) {
+        return [pscustomobject]@{
+            status = "pid-reused"
+            alive = $false
+            currentStartTimeUtc = $currentStartTimeUtc
+            issue = $null
+        }
+    }
+    return [pscustomobject]@{
+        status = "alive-owned"
+        alive = $true
+        currentStartTimeUtc = $currentStartTimeUtc
+        issue = $null
+    }
+}
+
+function Invoke-ExactTreeKill {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RootPid,
+        [int]$TimeoutSeconds = 10
+    )
+
+    $taskkillPath = Join-Path $env:SystemRoot "System32\taskkill.exe"
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $taskkillPath
+    $startInfo.Arguments = "/PID $RootPid /T /F"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        return [pscustomobject]@{ pass = $false; exitCode = $null; issue = "taskkill.exe did not start" }
+    }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    if (-not (Wait-ProcessUntilDeadline -Process $process -Deadline $deadline)) {
+        try { $process.Kill() } catch { }
+        $null = $process.WaitForExit(2000)
+        return [pscustomobject]@{ pass = $false; exitCode = $null; issue = "taskkill.exe timed out" }
+    }
+    $stdoutComplete = Wait-TaskUntilDeadline -Task $stdoutTask -Deadline $deadline
+    $stderrComplete = Wait-TaskUntilDeadline -Task $stderrTask -Deadline $deadline
+    if (-not $stdoutComplete -or -not $stderrComplete) {
+        return [pscustomobject]@{ pass = $false; exitCode = [int]$process.ExitCode; issue = "taskkill.exe pipe drain timed out" }
+    }
+    return [pscustomobject]@{
+        pass = $process.ExitCode -eq 0
+        exitCode = [int]$process.ExitCode
+        issue = if ($process.ExitCode -eq 0) { $null } else { $stderrTask.Result.Trim() }
+    }
+}
+
+function Stop-ExactOwnedProcessTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Session,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry
+    )
+
+    $issues = New-Object System.Collections.ArrayList
+    $null = @(Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry -BestEffort)
+    $launcherRecord = @($Session.OwnedProcesses | Where-Object { $_.roles -contains "launcher" }) | Select-Object -First 1
+    if ($null -ne $launcherRecord) {
+        $launcherState = Get-OwnedProcessState -Record $launcherRecord
+        if ($launcherState.alive -eq $true) {
+            $Session.ForcedCleanup = $true
+            $treeKill = Invoke-ExactTreeKill -RootPid $launcherRecord.pid
+            if (-not $treeKill.pass) {
+                $null = $issues.Add("exact launcher tree cleanup failed for PID $($launcherRecord.pid): $($treeKill.issue)")
+            }
+        }
+    }
+
+    foreach ($record in @($Session.OwnedProcesses | Sort-Object -Property depth -Descending)) {
+        $state = Get-OwnedProcessState -Record $record
+        if ($state.alive -ne $true) {
+            continue
+        }
+        $Session.ForcedCleanup = $true
+        try {
+            $ownedProcess = [System.Diagnostics.Process]::GetProcessById([int]$record.pid)
+            $ownedProcess.Kill()
+            if (-not $ownedProcess.WaitForExit(5000)) {
+                $null = $issues.Add("exact PID $($record.pid) did not exit after cleanup")
+            }
+        }
+        catch {
+            $postState = Get-OwnedProcessState -Record $record
+            if ($postState.alive -eq $true) {
+                $null = $issues.Add("exact PID $($record.pid) cleanup failed: $($_.Exception.Message)")
+            }
+        }
+    }
+    return [pscustomobject]@{ pass = $issues.Count -eq 0; issues = @($issues) }
+}
+
+function Invoke-OwnedPidAudit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry
+    )
+
+    $entries = @()
+    $alivePids = New-Object System.Collections.ArrayList
+    $unreadablePids = New-Object System.Collections.ArrayList
+    foreach ($record in @($OwnedRegistry | Sort-Object -Property pid, startTimeUtc -Unique)) {
+        $state = Get-OwnedProcessState -Record $record
+        if ($state.alive -eq $true) {
+            $null = $alivePids.Add([int]$record.pid)
+        }
+        if ($state.status -eq "unreadable") {
+            $null = $unreadablePids.Add([int]$record.pid)
+        }
+        $entries += [pscustomobject]@{
+            backend = $record.backend
+            session = $record.session
+            pid = [int]$record.pid
+            parentPid = [int]$record.parentPid
+            imageName = [string]$record.imageName
+            roles = @($record.roles)
+            startTimeUtc = $record.startTimeUtc
+            currentStartTimeUtc = $state.currentStartTimeUtc
+            status = $state.status
+            issue = $state.issue
+        }
+    }
+    $checkedPids = @($entries | ForEach-Object { [int]$_.pid } | Sort-Object -Unique)
+    return [pscustomobject]@{
+        pass = $entries.Count -gt 0 -and $alivePids.Count -eq 0 -and $unreadablePids.Count -eq 0
+        checkedPids = @($checkedPids)
+        alivePids = @($alivePids | Sort-Object -Unique)
+        unreadablePids = @($unreadablePids | Sort-Object -Unique)
+        checkedCount = $checkedPids.Count
+        aliveCount = @($alivePids | Sort-Object -Unique).Count
+        entries = @($entries)
+    }
 }
 
 function Resolve-ExistingPath {
@@ -90,18 +483,25 @@ function Invoke-PythonProbe {
     if (-not $process.Start()) {
         throw "$FailureMessage The interpreter could not be started: $Executable"
     }
+    $process.EnableRaisingEvents = $true
+    $null = $process.Handle
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit(30000)) {
-        $process.Kill()
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    if (-not (Wait-ProcessUntilDeadline -Process $process -Deadline $deadline)) {
+        $null = Invoke-ExactTreeKill -RootPid $process.Id
         $null = $process.WaitForExit(5000)
         throw "$FailureMessage The interpreter probe timed out."
     }
-    $stdoutTask.Wait()
-    $stderrTask.Wait()
+    if (-not (Wait-TaskUntilDeadline -Task $stdoutTask -Deadline $deadline)) {
+        throw "$FailureMessage The interpreter probe stdout drain timed out."
+    }
+    if (-not (Wait-TaskUntilDeadline -Task $stderrTask -Deadline $deadline)) {
+        throw "$FailureMessage The interpreter probe stderr drain timed out."
+    }
     $stdout = $stdoutTask.Result.Trim()
     $stderr = $stderrTask.Result.Trim()
-    $exitCode = $process.ExitCode
+    $exitCode = [int]$process.ExitCode
     $process.Dispose()
 
     if ($exitCode -ne 0) {
@@ -114,32 +514,52 @@ function Invoke-PythonProbe {
 function Get-PythonRuntimeChild {
     param(
         [Parameter(Mandatory = $true)]
-        [System.Diagnostics.Process]$Launcher,
+        [object]$Session,
         [Parameter(Mandatory = $true)]
-        [string]$Backend,
-        [Parameter(Mandatory = $true)]
-        [int]$Index
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
     while ([DateTime]::UtcNow -lt $deadline) {
-        $children = @(
-            Get-CimInstance Win32_Process -Filter "ParentProcessId = $($Launcher.Id)" |
-                Where-Object { $_.Name -ieq "python.exe" -or $_.Name -ieq "pythonw.exe" }
+        $null = @(Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry)
+        $candidates = @(
+            $Session.OwnedProcesses | Where-Object {
+                $_.pid -ne $Session.Process.Id -and
+                ($_.imageName -ieq "python.exe" -or $_.imageName -ieq "pythonw.exe") -and
+                $null -ne $_.process
+            }
         )
-        if ($children.Count -eq 1) {
-            return Get-Process -Id $children[0].ProcessId
+        $runningCandidates = @()
+        foreach ($candidate in $candidates) {
+            try {
+                $candidate.process.Refresh()
+                if (-not $candidate.process.HasExited) {
+                    $runningCandidates += $candidate
+                }
+            }
+            catch {
+                # Discovery will retry until the absolute child-discovery deadline.
+            }
         }
-        if ($children.Count -gt 1) {
-            throw "$Backend session $Index launcher created multiple Python runtime children."
+        if ($runningCandidates.Count -eq 1) {
+            $runtimeRecord = Register-OwnedProcess -Session $Session -Process $runningCandidates[0].process `
+                -CimProcess $null -ProcessId ([int]$runningCandidates[0].pid) -Role "runtime" `
+                -ParentPid ([int]$runningCandidates[0].parentPid) -Depth ([int]$runningCandidates[0].depth) `
+                -ImageName ([string]$runningCandidates[0].imageName) -OwnedRegistry $OwnedRegistry
+            $null = @(Sync-OwnedDescendants -Session $Session -OwnedRegistry $OwnedRegistry)
+            return $runtimeRecord.process
         }
-        $Launcher.Refresh()
-        if ($Launcher.HasExited) {
-            throw "$Backend session $Index launcher exited before its Python runtime child was found."
+        if ($runningCandidates.Count -gt 1) {
+            throw "$($Session.Backend) session $($Session.Index) launcher created multiple Python runtime descendants."
+        }
+        $Session.Process.Refresh()
+        if ($Session.Process.HasExited) {
+            throw "$($Session.Backend) session $($Session.Index) launcher exited before its Python runtime child was found."
         }
         Start-Sleep -Milliseconds 25
     }
-    throw "$Backend session $Index did not create the expected Python runtime child within 5 seconds."
+    throw "$($Session.Backend) session $($Session.Index) did not create the expected Python runtime child within 5 seconds."
 }
 
 function Start-McpSession {
@@ -158,7 +578,9 @@ function Start-McpSession {
         [string]$SdkPath,
         [Parameter(Mandatory = $true)]
         [bool]$ExpectRuntimeChild,
-        [System.Collections.ArrayList]$ProcessRegistry
+        [System.Collections.ArrayList]$ProcessRegistry,
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry
     )
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -200,16 +622,24 @@ function Start-McpSession {
     if (-not $started) {
         throw "Failed to start $Backend session $Index."
     }
-    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.EnableRaisingEvents = $true
+    $null = $process.Handle
     $session = [pscustomobject]@{
         Backend = $Backend
         Index = $Index
         Process = $process
-        RuntimeProcess = $process
-        StderrTask = $stderrTask
+        RuntimeProcess = $null
+        OwnedRegistry = $OwnedRegistry
+        OwnedProcesses = New-Object System.Collections.ArrayList
+        StderrTask = $null
+        StdoutDrainTask = $null
+        StdoutTrailing = ""
+        StdoutDrainComplete = $false
+        StderrDrainComplete = $false
         ExpectedIds = New-Object System.Collections.ArrayList
         SeenIds = @{}
         Notifications = New-Object System.Collections.ArrayList
+        ResponseDeadlineCount = 0
         SentCounts = @{
             initialize = 0
             initializedNotification = 0
@@ -228,15 +658,37 @@ function Start-McpSession {
         SearchPaths = New-Object System.Collections.ArrayList
         InputClosed = $false
         ExitCode = $null
+        LauncherExitCodeReadable = $false
         HungAtEof = $false
         ForcedCleanup = $false
         Stderr = ""
         StderrClean = $false
         RuntimeExitCode = $null
+        RuntimeExitCodeReadable = $false
+        LauncherWaitCompleted = $false
+        RuntimeWaitCompleted = $false
+        DiscoveryComplete = $false
     }
     $null = $ProcessRegistry.Add($session)
-    if ($ExpectRuntimeChild) {
-        $session.RuntimeProcess = Get-PythonRuntimeChild -Launcher $process -Backend $Backend -Index $Index
+    $null = Register-OwnedProcess -Session $session -Process $process -CimProcess $null -ProcessId $process.Id `
+        -Role "launcher" -ParentPid 0 -Depth 0 -ImageName ([IO.Path]::GetFileName($Executable)) `
+        -OwnedRegistry $OwnedRegistry
+    $session.StderrTask = $process.StandardError.ReadToEndAsync()
+    try {
+        if ($ExpectRuntimeChild) {
+            $session.RuntimeProcess = Get-PythonRuntimeChild -Session $session -OwnedRegistry $OwnedRegistry
+        }
+        else {
+            $session.RuntimeProcess = $process
+            $null = Register-OwnedProcess -Session $session -Process $process -CimProcess $null -ProcessId $process.Id `
+                -Role "runtime" -ParentPid 0 -Depth 0 -ImageName ([IO.Path]::GetFileName($Executable)) `
+                -OwnedRegistry $OwnedRegistry
+        }
+        $session.DiscoveryComplete = $true
+    }
+    catch {
+        $null = Stop-ExactOwnedProcessTree -Session $session -OwnedRegistry $OwnedRegistry
+        throw
     }
     return $session
 }
@@ -258,6 +710,50 @@ function Send-JsonMessage {
     $Session.Process.StandardInput.Flush()
 }
 
+function Assert-ValidNotification {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Message,
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    if (
+        $null -eq $Message -or
+        $Message -is [System.Array] -or
+        $Message -is [string] -or
+        $Message -is [ValueType]
+    ) {
+        throw "$Context notification was not a JSON object."
+    }
+    if (-not (Test-ObjectProperty -InputObject $Message -Name "jsonrpc") -or [string]$Message.jsonrpc -ne "2.0") {
+        throw "$Context notification did not use jsonrpc 2.0."
+    }
+    if (
+        -not (Test-ObjectProperty -InputObject $Message -Name "method") -or
+        -not ($Message.method -is [string]) -or
+        [string]::IsNullOrWhiteSpace([string]$Message.method)
+    ) {
+        throw "$Context notification did not contain a nonempty method."
+    }
+    foreach ($forbidden in @("id", "result", "error")) {
+        if (Test-ObjectProperty -InputObject $Message -Name $forbidden) {
+            throw "$Context notification contained forbidden property '$forbidden'."
+        }
+    }
+    if (Test-ObjectProperty -InputObject $Message -Name "params") {
+        $params = $Message.params
+        if (
+            $null -eq $params -or
+            $params -is [System.Array] -or
+            $params -is [string] -or
+            $params -is [ValueType]
+        ) {
+            throw "$Context notification params was not an object."
+        }
+    }
+}
+
 function Receive-MatchingResponse {
     param(
         [Parameter(Mandatory = $true)]
@@ -268,9 +764,17 @@ function Receive-MatchingResponse {
         [int]$TimeoutSeconds
     )
 
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    if (Test-ObjectProperty -InputObject $Session -Name "ResponseDeadlineCount") {
+        $Session.ResponseDeadlineCount = [int]$Session.ResponseDeadlineCount + 1
+    }
     while ($true) {
+        $remainingMilliseconds = Get-RemainingMilliseconds -Deadline $deadline
+        if ($remainingMilliseconds -le 0) {
+            throw "$($Session.Backend) session $($Session.Index) timed out waiting for response $ExpectedId."
+        }
         $readTask = $Session.Process.StandardOutput.ReadLineAsync()
-        if (-not $readTask.Wait($TimeoutSeconds * 1000)) {
+        if (-not $readTask.Wait($remainingMilliseconds)) {
             throw "$($Session.Backend) session $($Session.Index) timed out waiting for response $ExpectedId."
         }
         $line = $readTask.Result
@@ -297,12 +801,7 @@ function Receive-MatchingResponse {
         $hasMethod = Test-ObjectProperty -InputObject $message -Name "method"
         $hasId = Test-ObjectProperty -InputObject $message -Name "id"
         if ($hasMethod) {
-            if ($hasId) {
-                throw "$($Session.Backend) session $($Session.Index) emitted an unsupported server request with an id."
-            }
-            if ([string]::IsNullOrWhiteSpace([string]$message.method)) {
-                throw "$($Session.Backend) session $($Session.Index) emitted a notification without a valid method."
-            }
+            Assert-ValidNotification -Message $message -Context "$($Session.Backend) session $($Session.Index)"
             $null = $Session.Notifications.Add([string]$message.method)
             continue
         }
@@ -571,11 +1070,19 @@ function Get-MemoryCheckpoint {
 }
 
 function Get-TrailingProtocolIssues {
-    param([object]$Session)
+    param(
+        [object]$Session,
+        [AllowEmptyString()]
+        [string]$TrailingOutput
+    )
 
     $issues = New-Object System.Collections.ArrayList
-    $trailingOutput = $Session.Process.StandardOutput.ReadToEnd()
-    foreach ($line in @($trailingOutput -split "`r?`n" | Where-Object { $_ })) {
+    $reader = New-Object System.IO.StringReader($TrailingOutput)
+    while ($null -ne ($line = $reader.ReadLine())) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            $null = $issues.Add("$($Session.Backend) session $($Session.Index) emitted an empty trailing protocol line")
+            continue
+        }
         try {
             $message = $line | ConvertFrom-Json -ErrorAction Stop
         }
@@ -593,8 +1100,14 @@ function Get-TrailingProtocolIssues {
         }
         $hasMethod = Test-ObjectProperty -InputObject $message -Name "method"
         $hasId = Test-ObjectProperty -InputObject $message -Name "id"
-        if ($hasMethod -and -not $hasId -and -not [string]::IsNullOrWhiteSpace([string]$message.method)) {
-            $null = $Session.Notifications.Add([string]$message.method)
+        if ($hasMethod) {
+            try {
+                Assert-ValidNotification -Message $message -Context "$($Session.Backend) session $($Session.Index) trailing"
+                $null = $Session.Notifications.Add([string]$message.method)
+            }
+            catch {
+                $null = $issues.Add($_.Exception.Message)
+            }
             continue
         }
         if ($hasId) {
@@ -605,7 +1118,99 @@ function Get-TrailingProtocolIssues {
         }
         $null = $issues.Add("$($Session.Backend) session $($Session.Index) emitted an invalid trailing protocol message")
     }
+    $reader.Dispose()
     return @($issues)
+}
+
+function Get-RequiredProcessExitCode {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    if ($null -eq $Process) {
+        return [pscustomobject]@{ readable = $false; code = $null; issue = "$Label process was not discovered" }
+    }
+    try {
+        $Process.Refresh()
+        if (-not $Process.HasExited) {
+            return [pscustomobject]@{ readable = $false; code = $null; issue = "$Label process had not exited" }
+        }
+        $rawCode = $Process.ExitCode
+        if ($null -eq $rawCode) {
+            return [pscustomobject]@{ readable = $false; code = $null; issue = "$Label exit code was null" }
+        }
+        return [pscustomobject]@{ readable = $true; code = [int]$rawCode; issue = $null }
+    }
+    catch {
+        return [pscustomobject]@{
+            readable = $false
+            code = $null
+            issue = "$Label exit code was unreadable: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Test-SessionExitCodesComplete {
+    param([object]$SessionEvidence)
+
+    if ($null -eq $SessionEvidence) {
+        return $false
+    }
+    foreach ($name in @("launcherExitCode", "runtimeExitCode")) {
+        if (-not (Test-ObjectProperty -InputObject $SessionEvidence -Name $name)) {
+            return $false
+        }
+        $value = $SessionEvidence.$name
+        if ($null -eq $value -or -not ($value -is [int]) -or [int]$value -ne 0) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-ProcessAuditComplete {
+    param([object]$Audit)
+
+    if ($null -eq $Audit) {
+        return $false
+    }
+    foreach ($name in @("pass", "checkedPids", "alivePids", "entries")) {
+        if (-not (Test-ObjectProperty -InputObject $Audit -Name $name)) {
+            return $false
+        }
+    }
+    return $Audit.pass -eq $true -and
+        $null -ne $Audit.checkedPids -and
+        @($Audit.checkedPids).Count -gt 0 -and
+        $null -ne $Audit.alivePids -and
+        @($Audit.alivePids).Count -eq 0 -and
+        $null -ne $Audit.entries -and
+        @($Audit.entries).Count -gt 0
+}
+
+function Test-AllExplicitPassComponents {
+    param([object]$Components)
+
+    if ($null -eq $Components) {
+        return $false
+    }
+    $required = @(
+        "liteProtocolAccountingCleanup",
+        "fastMcpProtocolAccountingCleanup",
+        "postRunPidAudit",
+        "exitCodeCompleteness",
+        "memoryStability",
+        "liteFastMcpIdleRatio",
+        "evidenceIntegrity"
+    )
+    foreach ($name in $required) {
+        if (-not (Test-ObjectProperty -InputObject $Components -Name $name) -or $Components.$name -ne $true) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Complete-SessionProcesses {
@@ -616,6 +1221,7 @@ function Complete-SessionProcesses {
         [int]$TimeoutSeconds
     )
 
+    $issues = New-Object System.Collections.ArrayList
     foreach ($session in $SessionObjects) {
         if (-not $session.InputClosed) {
             try {
@@ -625,50 +1231,139 @@ function Complete-SessionProcesses {
                 $session.InputClosed = $true
             }
         }
+        try {
+            $session.StdoutDrainTask = $session.Process.StandardOutput.ReadToEndAsync()
+        }
+        catch {
+            $null = $issues.Add("$($session.Backend) session $($session.Index) could not start stdout drain: $($_.Exception.Message)")
+        }
     }
 
-    $issues = New-Object System.Collections.ArrayList
     foreach ($session in $SessionObjects) {
-        if (-not $session.Process.WaitForExit($TimeoutSeconds * 1000)) {
-            $session.HungAtEof = $true
-            $null = $issues.Add("$($session.Backend) session $($session.Index) hung after stdin EOF")
-            $session.Process.Kill()
-            $null = $session.Process.WaitForExit(5000)
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        try {
+            $session.LauncherWaitCompleted = Wait-ProcessUntilDeadline -Process $session.Process -Deadline $deadline
         }
-        $session.ExitCode = $session.Process.ExitCode
-        if ($session.RuntimeProcess.Id -ne $session.Process.Id) {
-            if (-not $session.RuntimeProcess.HasExited -and -not $session.RuntimeProcess.WaitForExit(1000)) {
-                $session.HungAtEof = $true
-                $null = $issues.Add("$($session.Backend) session $($session.Index) runtime survived launcher EOF exit")
-                $session.RuntimeProcess.Kill()
-                $null = $session.RuntimeProcess.WaitForExit(5000)
-            }
-            if ($session.RuntimeProcess.HasExited) {
-                $session.RuntimeExitCode = $session.RuntimeProcess.ExitCode
-            }
+        catch {
+            $session.LauncherWaitCompleted = $false
+            $null = $issues.Add("$($session.Backend) session $($session.Index) launcher wait failed: $($_.Exception.Message)")
+        }
+        if (-not $session.LauncherWaitCompleted) {
+            $session.HungAtEof = $true
+            $null = $issues.Add("$($session.Backend) session $($session.Index) launcher hung after stdin EOF")
+        }
+        if ($null -eq $session.RuntimeProcess) {
+            $session.RuntimeWaitCompleted = $false
+            $null = $issues.Add("$($session.Backend) session $($session.Index) runtime process was not discovered")
         }
         else {
-            $session.RuntimeExitCode = $session.ExitCode
+            try {
+                $session.RuntimeWaitCompleted = Wait-ProcessUntilDeadline -Process $session.RuntimeProcess -Deadline $deadline
+            }
+            catch {
+                $session.RuntimeWaitCompleted = $false
+                $null = $issues.Add("$($session.Backend) session $($session.Index) runtime wait failed: $($_.Exception.Message)")
+            }
         }
-        $session.StderrTask.Wait()
-        $session.Stderr = $session.StderrTask.Result
+        if (-not $session.RuntimeWaitCompleted) {
+            $session.HungAtEof = $true
+            $null = $issues.Add("$($session.Backend) session $($session.Index) runtime hung after stdin EOF")
+        }
+
+        if (-not $session.LauncherWaitCompleted -or -not $session.RuntimeWaitCompleted) {
+            $cleanupResult = Stop-ExactOwnedProcessTree -Session $session -OwnedRegistry $session.OwnedRegistry
+            foreach ($cleanupIssue in @($cleanupResult.issues)) {
+                $null = $issues.Add("$($session.Backend) session $($session.Index) $cleanupIssue")
+            }
+        }
+
+        $launcherExit = Get-RequiredProcessExitCode -Process $session.Process `
+            -Label "$($session.Backend) session $($session.Index) launcher"
+        $session.LauncherExitCodeReadable = $launcherExit.readable
+        $session.ExitCode = $launcherExit.code
+        if (-not $launcherExit.readable) {
+            $null = $issues.Add($launcherExit.issue)
+        }
+        elseif ($launcherExit.code -ne 0) {
+            $null = $issues.Add("$($session.Backend) session $($session.Index) launcher exited with code $($launcherExit.code)")
+        }
+
+        $runtimeExit = Get-RequiredProcessExitCode -Process $session.RuntimeProcess `
+            -Label "$($session.Backend) session $($session.Index) runtime"
+        $session.RuntimeExitCodeReadable = $runtimeExit.readable
+        $session.RuntimeExitCode = $runtimeExit.code
+        if (-not $runtimeExit.readable) {
+            $null = $issues.Add($runtimeExit.issue)
+        }
+        elseif ($runtimeExit.code -ne 0) {
+            $null = $issues.Add("$($session.Backend) session $($session.Index) runtime exited with code $($runtimeExit.code)")
+        }
+
+        if ($null -eq $session.StdoutDrainTask) {
+            $null = $issues.Add("$($session.Backend) session $($session.Index) stdout drain task was missing")
+        }
+        else {
+            try {
+                $session.StdoutDrainComplete = Wait-TaskUntilDeadline -Task $session.StdoutDrainTask -Deadline $deadline
+                if ($session.StdoutDrainComplete) {
+                    $session.StdoutTrailing = $session.StdoutDrainTask.Result
+                }
+                else {
+                    $null = $issues.Add("$($session.Backend) session $($session.Index) stdout drain timed out")
+                }
+            }
+            catch {
+                $session.StdoutDrainComplete = $false
+                $null = $issues.Add("$($session.Backend) session $($session.Index) stdout drain failed: $($_.Exception.Message)")
+            }
+        }
+        try {
+            $session.StderrDrainComplete = Wait-TaskUntilDeadline -Task $session.StderrTask -Deadline $deadline
+            if ($session.StderrDrainComplete) {
+                $session.Stderr = $session.StderrTask.Result
+            }
+            else {
+                $null = $issues.Add("$($session.Backend) session $($session.Index) stderr drain timed out")
+            }
+        }
+        catch {
+            $session.StderrDrainComplete = $false
+            $null = $issues.Add("$($session.Backend) session $($session.Index) stderr drain failed: $($_.Exception.Message)")
+        }
         $session.StderrClean = $session.Stderr -notmatch "(?im)traceback|unhandled exception|\berror\b"
-        if ($session.ExitCode -ne 0) {
-            $null = $issues.Add("$($session.Backend) session $($session.Index) exited with code $($session.ExitCode)")
-        }
         if (-not $session.StderrClean) {
             $null = $issues.Add("$($session.Backend) session $($session.Index) emitted an error or traceback on stderr")
         }
-        foreach ($protocolIssue in @(Get-TrailingProtocolIssues -Session $session)) {
-            $null = $issues.Add($protocolIssue)
+        if ($session.StdoutDrainComplete) {
+            foreach ($protocolIssue in @(Get-TrailingProtocolIssues -Session $session -TrailingOutput $session.StdoutTrailing)) {
+                $null = $issues.Add($protocolIssue)
+            }
         }
     }
+    $allExited = @($SessionObjects | Where-Object {
+            -not $_.LauncherWaitCompleted -or -not $_.RuntimeWaitCompleted
+        }).Count -eq 0
+    $exitCodesComplete = @($SessionObjects | Where-Object {
+            $sessionEvidence = [pscustomobject]@{
+                launcherExitCode = $_.ExitCode
+                runtimeExitCode = $_.RuntimeExitCode
+            }
+            -not (Test-SessionExitCodesComplete -SessionEvidence $sessionEvidence)
+        }).Count -eq 0
+    $drainsComplete = @($SessionObjects | Where-Object {
+            -not $_.StdoutDrainComplete -or -not $_.StderrDrainComplete
+        }).Count -eq 0
+    $noForcedCleanup = @($SessionObjects | Where-Object { $_.ForcedCleanup }).Count -eq 0
     return [pscustomobject]@{
-        pass = $issues.Count -eq 0
-        allExited = @(
-            $SessionObjects | Where-Object { -not $_.Process.HasExited -or -not $_.RuntimeProcess.HasExited }
-        ).Count -eq 0
+        pass = $issues.Count -eq 0 -and $allExited -and $exitCodesComplete -and $drainsComplete -and $noForcedCleanup
+        allExited = $allExited
+        exitCodesComplete = $exitCodesComplete
+        drainsComplete = $drainsComplete
+        noForcedCleanup = $noForcedCleanup
         hungCount = @($SessionObjects | Where-Object { $_.HungAtEof }).Count
+        forcedCleanupCount = @($SessionObjects | Where-Object { $_.ForcedCleanup }).Count
+        exitTimeoutSeconds = $TimeoutSeconds
+        finitePipeDrains = $true
         issues = @($issues)
     }
 }
@@ -689,24 +1384,10 @@ function Stop-SessionProcessesForCleanup {
     }
     foreach ($session in $SessionObjects) {
         try {
-            if (-not $session.Process.WaitForExit(2000)) {
-                $session.ForcedCleanup = $true
-                $session.Process.Kill()
-                $null = $session.Process.WaitForExit(5000)
-            }
+            $null = Stop-ExactOwnedProcessTree -Session $session -OwnedRegistry $session.OwnedRegistry
         }
         catch {
-            # Cleanup is restricted to the exact child Process objects created by this script.
-        }
-        try {
-            if ($session.RuntimeProcess.Id -ne $session.Process.Id -and -not $session.RuntimeProcess.HasExited) {
-                $session.ForcedCleanup = $true
-                $session.RuntimeProcess.Kill()
-                $null = $session.RuntimeProcess.WaitForExit(5000)
-            }
-        }
-        catch {
-            # The exact runtime child may already have exited with its launcher.
+            # Final cleanup remains limited to this session's exact launcher tree and recorded PIDs.
         }
     }
 }
@@ -720,8 +1401,9 @@ function Assert-SessionAccounting {
     )
 
     $globalIds = @{}
+    [int]$expectedPerSession = 1 + (4 * $ExpectedCycles)
     foreach ($session in $SessionObjects) {
-        $expectedResponseCount = 1 + (4 * $ExpectedCycles)
+        $expectedResponseCount = $expectedPerSession
         if ($session.ExpectedIds.Count -ne $expectedResponseCount -or $session.SeenIds.Count -ne $expectedResponseCount) {
             throw "$($session.Backend) session $($session.Index) saw $($session.SeenIds.Count) of $expectedResponseCount expected responses."
         }
@@ -751,15 +1433,28 @@ function Assert-SessionAccounting {
             throw "$($session.Backend) session $($session.Index) did not complete all validated workflows."
         }
     }
+    return [pscustomobject]@{
+        pass = $true
+        idsIsolated = $true
+        exactResponseIds = $true
+        expectedResponsesPerSession = $expectedPerSession
+        expectedResponsesTotal = $expectedPerSession * $SessionObjects.Count
+        seenResponsesTotal = $globalIds.Count
+        sessionsValidated = $SessionObjects.Count
+        cyclesValidatedPerSession = $ExpectedCycles
+        issues = @()
+    }
 }
 
 function Convert-SessionEvidence {
     param([object]$Session)
 
     $stderrLines = @($Session.Stderr -split "`r?`n" | Where-Object { $_ })
+    $runtimePid = if ($null -eq $Session.RuntimeProcess) { $null } else { [int]$Session.RuntimeProcess.Id }
+    $runtimeExited = if ($null -eq $Session.RuntimeProcess) { $false } else { [bool]$Session.RuntimeProcess.HasExited }
     return [pscustomobject]@{
         session = $Session.Index
-        pid = $Session.RuntimeProcess.Id
+        pid = $runtimePid
         launcherPid = $Session.Process.Id
         cyclesCompleted = $Session.CyclesCompleted
         statusSuccesses = $Session.StatusSuccesses
@@ -770,18 +1465,34 @@ function Convert-SessionEvidence {
         searchItemCounts = @($Session.SearchItemCounts)
         responseIdsExpected = $Session.ExpectedIds.Count
         responseIdsSeen = $Session.SeenIds.Count
+        absoluteResponseDeadlinesUsed = $Session.ResponseDeadlineCount
         unsolicitedNotifications = @($Session.Notifications)
         sent = [pscustomobject]$Session.SentCounts
         sampleSearchPaths = @($Session.SearchPaths | Select-Object -Unique -First 5)
-        exitCode = $Session.ExitCode
+        launcherExitCode = $Session.ExitCode
         runtimeExitCode = $Session.RuntimeExitCode
+        launcherExitCodeReadable = $Session.LauncherExitCodeReadable
+        runtimeExitCodeReadable = $Session.RuntimeExitCodeReadable
         launcherExited = $Session.Process.HasExited
-        runtimeExited = $Session.RuntimeProcess.HasExited
+        runtimeExited = $runtimeExited
+        launcherWaitCompleted = $Session.LauncherWaitCompleted
+        runtimeWaitCompleted = $Session.RuntimeWaitCompleted
         hungAtEof = $Session.HungAtEof
         forcedCleanup = $Session.ForcedCleanup
+        stdoutDrainComplete = $Session.StdoutDrainComplete
+        stderrDrainComplete = $Session.StderrDrainComplete
         stderrClean = $Session.StderrClean
         stderrLineCount = $stderrLines.Count
         stderr = $Session.Stderr.Trim()
+        ownedPids = @($Session.OwnedProcesses | ForEach-Object {
+                [pscustomobject]@{
+                    pid = [int]$_.pid
+                    parentPid = [int]$_.parentPid
+                    imageName = [string]$_.imageName
+                    roles = @($_.roles)
+                    startTimeUtc = $_.startTimeUtc
+                }
+            })
     }
 }
 
@@ -819,7 +1530,9 @@ function Invoke-BackendMeasurement {
         [int]$ExitTimeout,
         [Parameter(Mandatory = $true)]
         [bool]$ExpectRuntimeChild,
-        [System.Collections.ArrayList]$ProcessRegistry
+        [System.Collections.ArrayList]$ProcessRegistry,
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$OwnedRegistry
     )
 
     Write-Host "Starting $ProcessCount $Backend processes ($Module)..."
@@ -829,7 +1542,7 @@ function Invoke-BackendMeasurement {
         for ($index = 1; $index -le $ProcessCount; $index++) {
             $sessionObjects += Start-McpSession -Backend $Backend -Module $Module -Index $index -Executable $Executable `
                 -WorkingDirectory $WorkingDirectory -SdkPath $SdkPath -ExpectRuntimeChild $ExpectRuntimeChild `
-                -ProcessRegistry $ProcessRegistry
+                -ProcessRegistry $ProcessRegistry -OwnedRegistry $OwnedRegistry
         }
         if ($sessionObjects.Count -ne $ProcessCount) {
             throw "$Backend started $($sessionObjects.Count) processes instead of $ProcessCount."
@@ -927,11 +1640,22 @@ function Invoke-BackendMeasurement {
         Start-Sleep -Seconds $IdleDurationSeconds
         $memory["postIdle"] = Get-MemoryCheckpoint -SessionObjects $sessionObjects -Name "postIdle" -Cycle $CycleCount
 
-        Assert-SessionAccounting -SessionObjects $sessionObjects -ExpectedCycles $CycleCount
+        $accounting = Assert-SessionAccounting -SessionObjects $sessionObjects -ExpectedCycles $CycleCount
         $cleanup = Complete-SessionProcesses -SessionObjects $sessionObjects -TimeoutSeconds $ExitTimeout
-        $completedNormally = $true
         if (-not $cleanup.pass) {
             throw "$Backend cleanup failed: $($cleanup.issues -join '; ')"
+        }
+        $completedNormally = $true
+
+        $protocol = [pscustomobject]@{
+            pass = $accounting.pass -eq $true
+            version = "2025-06-18"
+            responseDeadlineMode = "absolute"
+            responseTimeoutSeconds = $ResponseTimeout
+            notificationsValidated = $true
+            trailingNotificationsValidated = $true
+            malformedOutputFails = $true
+            stagesSentToAllBeforeCollection = $true
         }
 
         return [pscustomobject]@{
@@ -941,9 +1665,11 @@ function Invoke-BackendMeasurement {
             cyclesPerProcess = $CycleCount
             workflowsCompleted = ($sessionObjects | Measure-Object -Property CyclesCompleted -Sum).Sum
             realSearchSuccesses = ($sessionObjects | Measure-Object -Property SearchSuccesses -Sum).Sum
-            idsIsolated = $true
-            exactResponseIds = $true
+            idsIsolated = $accounting.idsIsolated
+            exactResponseIds = $accounting.exactResponseIds
             protocolVersion = "2025-06-18"
+            protocol = $protocol
+            accounting = $accounting
             memory = [pscustomobject]$memory
             cleanup = $cleanup
             processes = @($sessionObjects | ForEach-Object { Convert-SessionEvidence -Session $_ })
@@ -954,6 +1680,64 @@ function Invoke-BackendMeasurement {
             Stop-SessionProcessesForCleanup -SessionObjects $sessionObjects
         }
     }
+}
+
+function Test-BackendProtocolAccountingCleanup {
+    param(
+        [object]$BackendRun,
+        [int]$ExpectedSessions,
+        [int]$ExpectedCycles
+    )
+
+    if ($null -eq $BackendRun) {
+        return $false
+    }
+    foreach ($name in @("protocol", "accounting", "cleanup", "processes", "workflowsCompleted", "realSearchSuccesses")) {
+        if (-not (Test-ObjectProperty -InputObject $BackendRun -Name $name) -or $null -eq $BackendRun.$name) {
+            return $false
+        }
+    }
+    if (
+        $BackendRun.protocol.pass -ne $true -or
+        [string]$BackendRun.protocol.responseDeadlineMode -ne "absolute" -or
+        $BackendRun.accounting.pass -ne $true -or
+        $BackendRun.accounting.idsIsolated -ne $true -or
+        $BackendRun.accounting.exactResponseIds -ne $true -or
+        $BackendRun.cleanup.pass -ne $true -or
+        $BackendRun.cleanup.allExited -ne $true -or
+        $BackendRun.cleanup.exitCodesComplete -ne $true -or
+        $BackendRun.cleanup.drainsComplete -ne $true -or
+        $BackendRun.cleanup.noForcedCleanup -ne $true
+    ) {
+        return $false
+    }
+    if (
+        [int]$BackendRun.processCount -ne $ExpectedSessions -or
+        [int]$BackendRun.cyclesPerProcess -ne $ExpectedCycles -or
+        [int]$BackendRun.workflowsCompleted -ne ($ExpectedSessions * $ExpectedCycles) -or
+        [int]$BackendRun.realSearchSuccesses -ne ($ExpectedSessions * $ExpectedCycles) -or
+        @($BackendRun.processes).Count -ne $ExpectedSessions
+    ) {
+        return $false
+    }
+    foreach ($session in @($BackendRun.processes)) {
+        if (
+            -not (Test-SessionExitCodesComplete -SessionEvidence $session) -or
+            $session.launcherExitCodeReadable -ne $true -or
+            $session.runtimeExitCodeReadable -ne $true -or
+            $session.launcherWaitCompleted -ne $true -or
+            $session.runtimeWaitCompleted -ne $true -or
+            $session.stdoutDrainComplete -ne $true -or
+            $session.stderrDrainComplete -ne $true -or
+            $session.forcedCleanup -ne $false -or
+            $session.stderrClean -ne $true -or
+            [int]$session.cyclesCompleted -ne $ExpectedCycles -or
+            [int]$session.searchSuccesses -ne $ExpectedCycles
+        ) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Get-StabilityGate {
@@ -1017,6 +1801,56 @@ function Get-StabilityGate {
     }
 }
 
+function Get-GitValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $output = @(& git -C $WorkingDirectory @Arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "git $($Arguments -join ' ') failed: $($output -join ' ')"
+    }
+    $value = ($output -join "`n").Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw "git $($Arguments -join ' ') returned no value."
+    }
+    return $value
+}
+
+function Get-EvidenceIntegrity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath
+    )
+
+    $scriptSha256 = (Get-FileHash -LiteralPath $ScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $gitHead = Get-GitValue -WorkingDirectory $WorkingDirectory -Arguments @("rev-parse", "HEAD")
+    $gitTree = Get-GitValue -WorkingDirectory $WorkingDirectory -Arguments @("rev-parse", "HEAD^{tree}")
+    $headScriptBlob = Get-GitValue -WorkingDirectory $WorkingDirectory `
+        -Arguments @("rev-parse", "HEAD:scripts/measure_lite_sessions.ps1")
+    $workingScriptBlob = Get-GitValue -WorkingDirectory $WorkingDirectory `
+        -Arguments @("hash-object", "--", $ScriptPath)
+    $matchesHead = $headScriptBlob -eq $workingScriptBlob
+    return [pscustomobject]@{
+        pass = -not [string]::IsNullOrWhiteSpace($scriptSha256) -and
+            -not [string]::IsNullOrWhiteSpace($gitHead) -and
+            -not [string]::IsNullOrWhiteSpace($gitTree) -and
+            $matchesHead
+        scriptRelativePath = "scripts/measure_lite_sessions.ps1"
+        scriptSha256 = $scriptSha256
+        gitHead = $gitHead
+        gitTree = $gitTree
+        headScriptBlob = $headScriptBlob
+        workingScriptBlob = $workingScriptBlob
+        scriptMatchesHead = $matchesHead
+    }
+}
+
 function Format-MiB {
     param([long]$Bytes)
     return ([double]$Bytes / $MiB).ToString("F2", [Globalization.CultureInfo]::InvariantCulture)
@@ -1033,16 +1867,46 @@ function New-MarkdownSummary {
     $null = $lines.Add("- FastMCP: ``$($Evidence.environment.fastMcpVersion)``")
     $null = $lines.Add("- Sessions: ``$($Evidence.config.sessions)``; cycles per session: ``$($Evidence.config.cycles)``; idle seconds per backend: ``$($Evidence.config.idleSeconds)``")
     $null = $lines.Add("- Query: ``$($Evidence.config.query)``; scope: ``$($Evidence.config.scope)``; limit: ``$($Evidence.config.limit)``; sort: ``$($Evidence.config.sort)``; metadata: ``$($Evidence.config.metadata)``")
+    $null = $lines.Add("- Response deadline: ``$($Evidence.config.responseDeadlineMode)`` with ``$($Evidence.config.responseTimeoutSeconds)`` seconds per expected response; exit/drain timeout: ``$($Evidence.config.exitTimeoutSeconds)`` seconds per session.")
+    $null = $lines.Add("")
+    $null = $lines.Add("## Integrity")
+    $null = $lines.Add("")
+    $null = $lines.Add("- Script SHA-256: ``$($Evidence.integrity.scriptSha256)``")
+    $null = $lines.Add("- Git HEAD: ``$($Evidence.integrity.gitHead)``; tree: ``$($Evidence.integrity.gitTree)``")
+    $null = $lines.Add("- Script blob at HEAD: ``$($Evidence.integrity.headScriptBlob)``; measured blob: ``$($Evidence.integrity.workingScriptBlob)``; match/pass: ``$($Evidence.integrity.scriptMatchesHead)``/``$($Evidence.integrity.pass)``")
     $null = $lines.Add("")
     $null = $lines.Add("## Protocol and cleanup")
     $null = $lines.Add("")
-    $null = $lines.Add("| Backend | Workflows | Real searches | IDs isolated | EOF exits | Hangs |")
-    $null = $lines.Add("| --- | ---: | ---: | --- | --- | ---: |")
+    $null = $lines.Add("| Backend | Workflows | Real searches | Protocol | Accounting | Cleanup | Exit codes | Drains | Forced cleanup |")
+    $null = $lines.Add("| --- | ---: | ---: | --- | --- | --- | --- | --- | ---: |")
     foreach ($run in @($Evidence.backends)) {
-        $null = $lines.Add("| $($run.backend) | $($run.workflowsCompleted) | $($run.realSearchSuccesses) | $($run.idsIsolated) | $($run.cleanup.allExited) | $($run.cleanup.hungCount) |")
+        $null = $lines.Add("| $($run.backend) | $($run.workflowsCompleted) | $($run.realSearchSuccesses) | $($run.protocol.pass) | $($run.accounting.pass) | $($run.cleanup.pass) | $($run.cleanup.exitCodesComplete) | $($run.cleanup.drainsComplete) | $($run.cleanup.forcedCleanupCount) |")
     }
     $null = $lines.Add("")
     $null = $lines.Add("Every status response was validated as installed/running with backend ``sdk-ipc`` and a loaded database. Every count was numeric and positive; every search returned an existing file inside the configured scope.")
+    $null = $lines.Add("")
+    $null = $lines.Add("| Backend | Session | Launcher PID/code | Runtime PID/code | Launcher/runtime wait | Stdout/stderr drain | EOF hang | Forced cleanup |")
+    $null = $lines.Add("| --- | ---: | --- | --- | --- | --- | --- | --- |")
+    foreach ($run in @($Evidence.backends)) {
+        foreach ($process in @($run.processes)) {
+            $null = $lines.Add("| $($run.backend) | $($process.session) | $($process.launcherPid) / $($process.launcherExitCode) | $($process.pid) / $($process.runtimeExitCode) | $($process.launcherWaitCompleted) / $($process.runtimeWaitCompleted) | $($process.stdoutDrainComplete) / $($process.stderrDrainComplete) | $($process.hungAtEof) | $($process.forcedCleanup) |")
+        }
+    }
+    $null = $lines.Add("")
+    $null = $lines.Add("## Exact PID audit")
+    $null = $lines.Add("")
+    $checkedPids = @($Evidence.processAudit.checkedPids) -join ", "
+    $alivePids = if (@($Evidence.processAudit.alivePids).Count) { @($Evidence.processAudit.alivePids) -join ", " } else { "none" }
+    $unreadablePids = if (@($Evidence.processAudit.unreadablePids).Count) { @($Evidence.processAudit.unreadablePids) -join ", " } else { "none" }
+    $null = $lines.Add("- Checked exact owned PIDs: ``$checkedPids``")
+    $null = $lines.Add("- Alive owned PIDs: ``$alivePids``; unreadable PIDs: ``$unreadablePids``; pass: ``$($Evidence.processAudit.pass)``")
+    $null = $lines.Add("")
+    $null = $lines.Add("| Backend | Session | PID | Parent PID | Roles | Image | Recorded start UTC | Audit status |")
+    $null = $lines.Add("| --- | ---: | ---: | ---: | --- | --- | --- | --- |")
+    foreach ($entry in @($Evidence.processAudit.entries)) {
+        $roles = @($entry.roles) -join ","
+        $null = $lines.Add("| $($entry.backend) | $($entry.session) | $($entry.pid) | $($entry.parentPid) | $roles | $($entry.imageName) | $($entry.startTimeUtc) | $($entry.status) |")
+    }
     $null = $lines.Add("")
     $null = $lines.Add("## Memory")
     $null = $lines.Add("")
@@ -1066,6 +1930,12 @@ function New-MarkdownSummary {
         foreach ($processGate in @($gate.perProcess)) {
             $null = $lines.Add("- $($gate.backend) session $($processGate.session): ``$($processGate.postIdlePrivateBytes) <= $($processGate.plateauPrivateBytes) + max($($processGate.twentyPercentBytes), $($processGate.floorBytes)) = $($processGate.maximumBytes)``; pass: ``$($processGate.pass)``.")
         }
+    }
+    $null = $lines.Add("")
+    $null = $lines.Add("## Overall contract")
+    $null = $lines.Add("")
+    foreach ($component in @($Evidence.overallComponents.PSObject.Properties)) {
+        $null = $lines.Add("- $($component.Name): ``$($component.Value)``")
     }
     $null = $lines.Add("")
     $null = $lines.Add("Overall pass: **$($Evidence.overallPass)**")
@@ -1108,6 +1978,7 @@ elseif (-not [IO.Path]::IsPathRooted($OutputDirectory)) {
 }
 $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
 $null = New-Item -ItemType Directory -Path $outputPath -Force
+$integrity = Get-EvidenceIntegrity -WorkingDirectory $repoRootPath -ScriptPath $PSCommandPath
 
 $probe = Invoke-PythonProbe -Executable $pythonExecutable `
     -Code "import fastmcp, os, platform, sys; print(platform.python_version() + '|' + str(getattr(fastmcp, '__version__', 'unknown')) + '|' + ('1' if os.path.normcase(sys.executable) != os.path.normcase(getattr(sys, '_base_executable', sys.executable)) else '0'))" `
@@ -1123,13 +1994,15 @@ try {
         -WorkingDirectory $repoRootPath -SdkPath $sdkPath -ScopePath $scopePath -SearchQuery $Query `
         -ProcessCount $Sessions -CycleCount $Cycles -IdleDurationSeconds $IdleSeconds -SearchLimit $Limit `
         -SearchSort $Sort -SearchMetadata ([bool]$Metadata) -ResponseTimeout $ResponseTimeoutSeconds `
-        -ExitTimeout $ExitTimeoutSeconds -ExpectRuntimeChild $expectRuntimeChild -ProcessRegistry $ActiveSessions
+        -ExitTimeout $ExitTimeoutSeconds -ExpectRuntimeChild $expectRuntimeChild -ProcessRegistry $ActiveSessions `
+        -OwnedRegistry $OwnedProcessRecords
 
     $fastMcp = Invoke-BackendMeasurement -Backend "fastmcp" -Module "everything_mcp" -Executable $pythonExecutable `
         -WorkingDirectory $repoRootPath -SdkPath $sdkPath -ScopePath $scopePath -SearchQuery $Query `
         -ProcessCount $Sessions -CycleCount $Cycles -IdleDurationSeconds $IdleSeconds -SearchLimit $Limit `
         -SearchSort $Sort -SearchMetadata ([bool]$Metadata) -ResponseTimeout $ResponseTimeoutSeconds `
-        -ExitTimeout $ExitTimeoutSeconds -ExpectRuntimeChild $expectRuntimeChild -ProcessRegistry $ActiveSessions
+        -ExitTimeout $ExitTimeoutSeconds -ExpectRuntimeChild $expectRuntimeChild -ProcessRegistry $ActiveSessions `
+        -OwnedRegistry $OwnedProcessRecords
 
     $liteStability = Get-StabilityGate -BackendRun $lite -ProcessCount $Sessions
     $fastMcpStability = Get-StabilityGate -BackendRun $fastMcp -ProcessCount $Sessions
@@ -1147,12 +2020,30 @@ try {
         maximumRatio = 0.5
         pass = $idleRatio -le 0.5
     }
-    $overallPass = $idleGate.pass -and $liteStability.pass -and $fastMcpStability.pass
+    $processAudit = Invoke-OwnedPidAudit -OwnedRegistry $OwnedProcessRecords
+    $allSessionEvidence = @($lite.processes) + @($fastMcp.processes)
+    $exitCodeCompleteness = $allSessionEvidence.Count -eq (2 * $Sessions) -and
+        @($allSessionEvidence | Where-Object {
+                -not (Test-SessionExitCodesComplete -SessionEvidence $_)
+            }).Count -eq 0
+    $overallComponents = [pscustomobject]@{
+        liteProtocolAccountingCleanup = Test-BackendProtocolAccountingCleanup -BackendRun $lite `
+            -ExpectedSessions $Sessions -ExpectedCycles $Cycles
+        fastMcpProtocolAccountingCleanup = Test-BackendProtocolAccountingCleanup -BackendRun $fastMcp `
+            -ExpectedSessions $Sessions -ExpectedCycles $Cycles
+        postRunPidAudit = Test-ProcessAuditComplete -Audit $processAudit
+        exitCodeCompleteness = $exitCodeCompleteness
+        memoryStability = $liteStability.pass -eq $true -and $fastMcpStability.pass -eq $true
+        liteFastMcpIdleRatio = $idleGate.pass -eq $true
+        evidenceIntegrity = $integrity.pass -eq $true
+    }
+    $overallPass = Test-AllExplicitPassComponents -Components $overallComponents
 
     $evidence = [pscustomobject]@{
-        schemaVersion = 1
+        schemaVersion = 2
         generatedAtUtc = [DateTime]::UtcNow.ToString("o")
         durationSeconds = [Math]::Round(([DateTime]::UtcNow - $startedAtUtc).TotalSeconds, 3)
+        integrity = $integrity
         environment = [pscustomobject]@{
             pythonVersion = $pythonVersion
             pythonExecutable = $pythonExecutable
@@ -1171,14 +2062,17 @@ try {
             limit = $Limit
             sort = $Sort
             metadata = [bool]$Metadata
+            responseDeadlineMode = "absolute"
             responseTimeoutSeconds = $ResponseTimeoutSeconds
             exitTimeoutSeconds = $ExitTimeoutSeconds
         }
         backends = @($lite, $fastMcp)
+        processAudit = $processAudit
         gates = [pscustomobject]@{
             liteIdleVsFastMcp = $idleGate
             stability = @($liteStability, $fastMcpStability)
         }
+        overallComponents = $overallComponents
         overallPass = $overallPass
     }
 
@@ -1193,7 +2087,7 @@ try {
     Write-Host "Markdown summary: $markdownPath"
     Write-Host ("Lite/FastMCP idle private ratio: {0:F6}" -f $idleRatio)
     if (-not $overallPass) {
-        throw "One or more memory gates failed. Evidence was written to $jsonPath and $markdownPath."
+        throw "One or more protocol, cleanup, PID audit, integrity, or memory gates failed. Evidence was written to $jsonPath and $markdownPath."
     }
 }
 finally {
