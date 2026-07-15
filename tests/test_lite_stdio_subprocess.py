@@ -682,6 +682,321 @@ $watch.Stop()
     assert 75 <= result["elapsedMilliseconds"] < 1000
 
 
+def test_measurement_script_bounds_every_cim_call_with_one_absolute_deadline() -> None:
+    source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    bounded_cim_source = measurement_function_source("Get-BoundedCimProcess")
+    sync_source = measurement_function_source("Sync-OwnedDescendants")
+    runtime_source = measurement_function_source("Get-PythonRuntimeChild")
+    cleanup_source = measurement_function_source("Stop-ExactOwnedProcessTree")
+
+    assert source.count("Get-CimInstance") == 1
+    assert bounded_cim_source.count("Get-CimInstance") == 1
+    assert "-OperationTimeoutSec $operationTimeoutSeconds" in bounded_cim_source
+    assert bounded_cim_source.count("Get-RemainingMilliseconds") >= 2
+    assert "[DateTime]$DeadlineUtc" in sync_source
+    assert "Get-CimInstance" not in sync_source
+    assert sync_source.count("Get-BoundedCimProcess") >= 2
+    assert runtime_source.count("Sync-OwnedDescendants") == runtime_source.count("-DeadlineUtc $deadline")
+    assert "-DeadlineUtc $discoveryDeadline" in cleanup_source
+
+
+def test_bounded_cim_probe_caps_timeout_and_fails_expired_deadlines_promptly() -> None:
+    body = r"""
+$script:cimCalls = 0
+$script:operationTimeouts = New-Object System.Collections.ArrayList
+$script:delayMilliseconds = 0
+function Get-CimInstance {
+    [CmdletBinding()]
+    param(
+        [string]$ClassName,
+        [string]$Filter,
+        [uint32]$OperationTimeoutSec
+    )
+    $script:cimCalls += 1
+    $null = $script:operationTimeouts.Add([int]$OperationTimeoutSec)
+    if ($script:delayMilliseconds -gt 0) {
+        Start-Sleep -Milliseconds $script:delayMilliseconds
+    }
+    return [pscustomobject]@{ ProcessId = 1; ParentProcessId = 0; Name = 'python.exe' }
+}
+
+$bounded = @(Get-BoundedCimProcess -Filter 'ProcessId = 1' `
+    -DeadlineUtc ([DateTime]::UtcNow.AddSeconds(4)) -Context 'bounded-test')
+
+$expiredStopwatch = [Diagnostics.Stopwatch]::StartNew()
+$expiredFailed = $false
+try {
+    $null = @(Get-BoundedCimProcess -Filter 'ProcessId = 2' `
+        -DeadlineUtc ([DateTime]::UtcNow.AddMilliseconds(-1)) -Context 'expired-test')
+}
+catch {
+    $expiredFailed = $_.Exception.Message -match 'deadline'
+}
+$expiredStopwatch.Stop()
+
+$script:delayMilliseconds = 1500
+$overrunStopwatch = [Diagnostics.Stopwatch]::StartNew()
+$overrunFailed = $false
+try {
+    $null = @(Get-BoundedCimProcess -Filter 'ProcessId = 3' `
+        -DeadlineUtc ([DateTime]::UtcNow.AddMilliseconds(1200)) -Context 'overrun-test')
+}
+catch {
+    $overrunFailed = $_.Exception.Message -match 'deadline'
+}
+$overrunStopwatch.Stop()
+
+[pscustomobject]@{
+    boundedCount = $bounded.Count
+    cimCalls = $script:cimCalls
+    operationTimeouts = @($script:operationTimeouts)
+    expiredFailed = $expiredFailed
+    expiredMilliseconds = $expiredStopwatch.ElapsedMilliseconds
+    overrunFailed = $overrunFailed
+    overrunMilliseconds = $overrunStopwatch.ElapsedMilliseconds
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(
+        ["Get-RemainingMilliseconds", "Get-CimOperationTimeoutSeconds", "Get-BoundedCimProcess"],
+        body,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["boundedCount"] == 1
+    assert result["cimCalls"] == 2
+    assert result["operationTimeouts"] == [2, 1]
+    assert result["expiredFailed"] is True
+    assert result["expiredMilliseconds"] < 500
+    assert result["overrunFailed"] is True
+    assert 1400 <= result["overrunMilliseconds"] < 3000
+
+
+def test_probe_lifetime_is_locally_owned_and_disposed_inside_outer_cleanup() -> None:
+    source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    probe_source = measurement_function_source("Invoke-PythonProbe")
+    close_source = measurement_function_source("Close-ProbeResources")
+
+    assert "try {" in probe_source and "finally {" in probe_source
+    assert "Register-OwnedProcess" in probe_source
+    assert "Sync-OwnedDescendants" in probe_source
+    assert "-DeadlineUtc $discoveryDeadline" in probe_source
+    assert "Stop-ExactOwnedProcessTree" in probe_source
+    assert "$cleanupResult.treeKill" in probe_source
+    assert "$cleanupResult.waitResults" in probe_source
+    assert "Close-ProbeResources" in probe_source
+    assert "ownedEntries" in probe_source
+    assert "output = $stdout" in probe_source
+    assert ".Dispose()" in close_source
+    assert "$null = Invoke-ExactTreeKill" not in probe_source
+    assert re.search(
+        r"(?ms)\$startedAtUtc\s*=.*?\ntry\s*\{\s*\n\s*\$probe\s*=\s*Invoke-PythonProbe",
+        source,
+    )
+
+
+def test_exact_cleanup_falls_back_after_simulated_tree_kill_timeout() -> None:
+    body = r"""
+$startInfo = New-Object System.Diagnostics.ProcessStartInfo
+$startInfo.FileName = Join-Path $PSHOME 'powershell.exe'
+$startInfo.Arguments = '-NoProfile -Command "Start-Sleep -Seconds 30"'
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$process = New-Object System.Diagnostics.Process
+$process.StartInfo = $startInfo
+$null = $process.Start()
+$process.EnableRaisingEvents = $true
+$null = $process.Handle
+
+$registry = New-Object System.Collections.ArrayList
+$session = [pscustomobject]@{
+    Backend = 'probe-cleanup-test'
+    Index = 1
+    Process = $process
+    OwnedRegistry = $registry
+    OwnedProcesses = New-Object System.Collections.ArrayList
+    ForcedCleanup = $false
+    DiscoveryComplete = $true
+}
+$null = Register-OwnedProcess -Session $session -Process $process -Role 'launcher' -OwnedRegistry $registry
+$script:syncDeadline = $null
+$script:treeKillCalls = 0
+function Sync-OwnedDescendants {
+    param($Session, $OwnedRegistry, [DateTime]$DeadlineUtc, [switch]$BestEffort)
+    $script:syncDeadline = $DeadlineUtc
+    return @()
+}
+function Invoke-ExactTreeKill {
+    param($RootProcess, [long]$ExpectedStartTimeUtcTicks, [int]$TimeoutSeconds)
+    $script:treeKillCalls += 1
+    return [pscustomobject]@{
+        pass = $false
+        invoked = $true
+        waitCompleted = $false
+        exitCode = $null
+        issue = 'simulated taskkill timeout'
+    }
+}
+
+try {
+    $result = Stop-ExactOwnedProcessTree -Session $session -OwnedRegistry $registry `
+        -DiscoveryTimeoutSeconds 1 -HandleWaitTimeoutSeconds 2
+    $process.Refresh()
+    [pscustomobject]@{
+        pass = $result.pass
+        discoveryComplete = $result.discoveryComplete
+        syncDeadlineProvided = $null -ne $script:syncDeadline
+        treeKillCalls = $script:treeKillCalls
+        treeKillPass = $result.treeKill.pass
+        treeKillIssue = $result.treeKill.issue
+        fallbackPids = @($result.fallbackAttemptedPids)
+        waitResultCount = @($result.waitResults).Count
+        allWaitsCompleted = @($result.waitResults | Where-Object { -not $_.waitCompleted }).Count -eq 0
+        verificationStatuses = @($result.verification | ForEach-Object { $_.status })
+        exited = $process.HasExited
+        forcedCleanup = $session.ForcedCleanup
+    } | ConvertTo-Json -Depth 10 -Compress
+}
+finally {
+    try {
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            $process.Kill()
+            $null = $process.WaitForExit(2000)
+        }
+    }
+    catch { }
+    $process.Dispose()
+}
+"""
+    completed = run_measurement_function_probe(
+        ["Get-ExactProcessIdentity", "Register-OwnedProcess", "Get-OwnedProcessState", "Stop-ExactOwnedProcessTree"],
+        body,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["pass"] is True
+    assert result["discoveryComplete"] is True
+    assert result["syncDeadlineProvided"] is True
+    assert result["treeKillCalls"] == 1
+    assert result["treeKillPass"] is False
+    assert result["treeKillIssue"] == "simulated taskkill timeout"
+    assert len(result["fallbackPids"]) == 1
+    assert result["waitResultCount"] == 1
+    assert result["allWaitsCompleted"] is True
+    assert result["verificationStatuses"] == ["exited"]
+    assert result["exited"] is True
+    assert result["forcedCleanup"] is True
+
+
+def test_probe_resource_closer_disposes_streams_tasks_and_unique_handles() -> None:
+    body = r"""
+$script:disposed = @{}
+function New-Disposable {
+    param([string]$Name, [bool]$IsCompleted = $true)
+    $value = [pscustomobject]@{ Name = $Name; IsCompleted = $IsCompleted }
+    $value | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+        if (-not $script:disposed.ContainsKey($this.Name)) {
+            $script:disposed[$this.Name] = 0
+        }
+        $script:disposed[$this.Name] += 1
+    }
+    return $value
+}
+$stdout = New-Disposable -Name 'stdout'
+$stderr = New-Disposable -Name 'stderr'
+$root = New-Disposable -Name 'root'
+$root | Add-Member -NotePropertyName StandardOutput -NotePropertyValue $stdout
+$root | Add-Member -NotePropertyName StandardError -NotePropertyValue $stderr
+$child = New-Disposable -Name 'child'
+$stdoutTask = New-Disposable -Name 'stdoutTask'
+$stderrTask = New-Disposable -Name 'stderrTask'
+$records = @(
+    [pscustomobject]@{ owned = $true; process = $root },
+    [pscustomobject]@{ owned = $true; process = $child }
+)
+$result = Close-ProbeResources -Process $root -StdoutTask $stdoutTask -StderrTask $stderrTask `
+    -OwnedRecords $records
+[pscustomobject]@{
+    pass = $result.pass
+    issues = @($result.issues)
+    stdout = $script:disposed.stdout
+    stderr = $script:disposed.stderr
+    stdoutTask = $script:disposed.stdoutTask
+    stderrTask = $script:disposed.stderrTask
+    root = $script:disposed.root
+    child = $script:disposed.child
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(["Close-ProbeResources"], body)
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result == {
+        "pass": True,
+        "issues": [],
+        "stdout": 1,
+        "stderr": 1,
+        "stdoutTask": 1,
+        "stderrTask": 1,
+        "root": 1,
+        "child": 1,
+    }
+
+
+def test_probe_lifecycle_contract_is_fail_closed_and_joined_to_pid_recheck() -> None:
+    source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    assert "probeLifecycle" in source
+    assert "$allAuditEntries" in source
+    assert "Invoke-IndependentPidRecheck -AuditEntries @($allAuditEntries)" in source
+
+    body = r"""
+$lifecycle = [pscustomobject]@{
+    pass = $true
+    exitCode = [int]0
+    forcedCleanup = $false
+    discoveryComplete = $true
+    ownedCount = 1
+    ownedEntries = @(
+        [pscustomobject]@{
+            pid = 101
+            startTimeUtc = '2026-01-01T00:00:00Z'
+            startTimeUtcTicks = [long]1
+            status = 'exited'
+        }
+    )
+    treeKill = [pscustomobject]@{ pass = $true; invoked = $false; waitCompleted = $true }
+    fallbackAttemptedPids = @()
+    waitResults = @([pscustomobject]@{ pid = 101; waitCompleted = $true })
+    verification = @([pscustomobject]@{ pid = 101; startTimeUtcTicks = [long]1; status = 'exited' })
+    resourceDisposal = [pscustomobject]@{ pass = $true; disposedProcessHandleCount = 1 }
+}
+$valid = Test-ProbeLifecycleComplete -Lifecycle $lifecycle
+$lifecycle.exitCode = $null
+$nullExitFails = -not (Test-ProbeLifecycleComplete -Lifecycle $lifecycle)
+$lifecycle.exitCode = [int]0
+$lifecycle.ownedEntries[0].startTimeUtcTicks = $null
+$nullIdentityFails = -not (Test-ProbeLifecycleComplete -Lifecycle $lifecycle)
+$lifecycle.ownedEntries[0].startTimeUtcTicks = [long]1
+$lifecycle.resourceDisposal.pass = $false
+$disposalFails = -not (Test-ProbeLifecycleComplete -Lifecycle $lifecycle)
+[pscustomobject]@{
+    valid = $valid
+    nullExitFails = $nullExitFails
+    nullIdentityFails = $nullIdentityFails
+    disposalFails = $disposalFails
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(
+        ["Test-ObjectProperty", "Test-ProbeLifecycleComplete"],
+        body,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert all(json.loads(completed.stdout).values())
+
+
 def test_measurement_script_owns_and_cleans_only_exact_process_trees() -> None:
     measurement_source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
     test_source = Path(__file__).read_text(encoding="utf-8")
@@ -929,6 +1244,7 @@ def test_measurement_evidence_contract_fails_closed_on_exit_codes_and_pid_audit(
         "exitCodesComplete",
         "processAudit",
         "memoryValidation",
+        "probeLifecycle",
         "independentPidRecheck",
         "pidRecheckPath",
         "overallComponents",
@@ -1007,6 +1323,7 @@ $components = [pscustomobject]@{
     liteProtocolAccountingCleanup = $true
     fastMcpProtocolAccountingCleanup = $true
     postRunPidAudit = $true
+    probeLifecycleCleanup = $true
     independentPidRecheck = $true
     exitCodeCompleteness = $true
     memoryEvidenceValidation = $true
@@ -1020,6 +1337,9 @@ $missingOverallFails = -not (Test-AllExplicitPassComponents -Components $compone
 $components.memoryEvidenceValidation = $true
 $components.independentPidRecheck = $null
 $missingRecheckFails = -not (Test-AllExplicitPassComponents -Components $components)
+$components.independentPidRecheck = $true
+$components.probeLifecycleCleanup = $null
+$missingProbeLifecycleFails = -not (Test-AllExplicitPassComponents -Components $components)
 
 [pscustomobject]@{
     validExitCodes = $validExitCodes
@@ -1037,6 +1357,7 @@ $missingRecheckFails = -not (Test-AllExplicitPassComponents -Components $compone
     validOverall = $validOverall
     missingOverallFails = $missingOverallFails
     missingRecheckFails = $missingRecheckFails
+    missingProbeLifecycleFails = $missingProbeLifecycleFails
 } | ConvertTo-Json -Compress
 """
     completed = run_measurement_function_probe(
