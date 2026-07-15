@@ -10,9 +10,10 @@ from __future__ import annotations
 import ctypes
 import platform
 from ctypes import wintypes
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from everything_mcp.config import EverythingConfig
 from everything_mcp.contracts import AdapterStatus, SearchBatch, SearchHit, SortName, TargetMachineName
@@ -37,14 +38,16 @@ REQUEST_DATE_MODIFIED = 0x00000040
 REQUEST_ATTRIBUTES = 0x00000100
 METADATA_FLAGS = REQUEST_FULL_PATH | REQUEST_SIZE | REQUEST_DATE_MODIFIED | REQUEST_ATTRIBUTES
 PATH_ONLY_FLAGS = REQUEST_FULL_PATH
-WINDOWS_EPOCH_AS_UNIX_SECONDS = 11644473600
 UNKNOWN_FILETIME_VALUES = {0, 0xFFFFFFFFFFFFFFFF}
+INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 TARGET_MACHINES: dict[int, TargetMachineName] = {1: "x86", 2: "x64", 3: "ARM", 4: "ARM64"}
-METADATA_FLAG_NAMES = {
-    REQUEST_SIZE: "size",
-    REQUEST_DATE_MODIFIED: "dateModified",
-    REQUEST_ATTRIBUTES: "attributes",
-}
+REQUEST_FLAG_NAMES = (
+    (REQUEST_FULL_PATH, "fullPath"),
+    (REQUEST_SIZE, "size"),
+    (REQUEST_DATE_MODIFIED, "dateModified"),
+    (REQUEST_ATTRIBUTES, "attributes"),
+)
+T = TypeVar("T")
 
 
 class SdkIpcAdapter:
@@ -77,9 +80,12 @@ class SdkIpcAdapter:
                 "Could not load the configured Everything SDK DLL; verify the configured path, process bitness, "
                 "and DLL dependencies."
             )
-        except AttributeError as exc:
+        except AttributeError:
             self._dll = None
-            self._load_error = f"Everything SDK DLL loading or required function lookup failed: {exc}"
+            self._load_error = (
+                "Everything SDK DLL loading or required function lookup failed; verify the SDK DLL version and "
+                "process bitness."
+            )
 
     def _configure_functions(self) -> None:
         if self._dll is None:
@@ -120,9 +126,9 @@ class SdkIpcAdapter:
         self._dll.Everything_GetLastError.restype = wintypes.DWORD
         self._dll.Everything_GetResultFullPathNameW.argtypes = [wintypes.DWORD, wintypes.LPWSTR, wintypes.DWORD]
         self._dll.Everything_GetResultFullPathNameW.restype = wintypes.DWORD
-        self._dll.Everything_GetResultSize.argtypes = [wintypes.DWORD, ctypes.POINTER(ctypes.c_ulonglong)]
+        self._dll.Everything_GetResultSize.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.LARGE_INTEGER)]
         self._dll.Everything_GetResultSize.restype = wintypes.BOOL
-        self._dll.Everything_GetResultDateModified.argtypes = [wintypes.DWORD, ctypes.POINTER(ctypes.c_ulonglong)]
+        self._dll.Everything_GetResultDateModified.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.FILETIME)]
         self._dll.Everything_GetResultDateModified.restype = wintypes.BOOL
         self._dll.Everything_GetResultAttributes.argtypes = [wintypes.DWORD]
         self._dll.Everything_GetResultAttributes.restype = wintypes.DWORD
@@ -140,8 +146,8 @@ class SdkIpcAdapter:
         try:
             db_loaded = bool(self._dll.Everything_IsDBLoaded())
             last_error = int(self._dll.Everything_GetLastError()) if not db_loaded else 0
-        except (AttributeError, OSError) as exc:
-            notes.append(f"Everything SDK loaded but the IPC readiness check failed: {exc}")
+        except (AttributeError, OSError, TypeError, ValueError):
+            notes.append("Everything SDK loaded but the IPC readiness check failed; restart Everything and retry.")
             return AdapterStatus(everything_installed, False, "none", False, notes=tuple(notes))
 
         if not db_loaded and last_error != 0:
@@ -173,13 +179,14 @@ class SdkIpcAdapter:
     def count(self, query: str, scope: str | None = None) -> int:
         self._ensure_ready()
         dll = self._ready_dll()
-        try:
+
+        def operation() -> int:
             self._set_query(query, scope)
             dll.Everything_SetRequestFlags(PATH_ONLY_FLAGS)
             self._query()
             return int(dll.Everything_GetTotResults())
-        finally:
-            dll.Everything_Reset()
+
+        return self._run_with_reset("count", operation)
 
     def search(
         self,
@@ -193,7 +200,8 @@ class SdkIpcAdapter:
         dll = self._ready_dll()
         requested_sort = _sort_flag(sort)
         requested_flags = METADATA_FLAGS if metadata else PATH_ONLY_FLAGS
-        try:
+
+        def operation() -> list[SearchHit] | SearchBatch:
             self._set_query(query, scope)
             dll.Everything_SetSort(requested_sort)
             dll.Everything_SetRequestFlags(requested_flags)
@@ -202,11 +210,43 @@ class SdkIpcAdapter:
             actual_sort = int(dll.Everything_GetResultListSort())
             actual_flags = int(dll.Everything_GetResultListRequestFlags())
             num_results = int(dll.Everything_GetNumResults())
-            hits = [self._result_hit(index, metadata, actual_flags) for index in range(num_results)]
-            note = _result_diagnostic_note(requested_sort, actual_sort, metadata, actual_flags)
-            return SearchBatch(hits=hits, notes=(note,)) if note is not None else hits
-        finally:
+            unavailable_fields = _missing_requested_fields(requested_flags, actual_flags)
+            hits: list[SearchHit] = []
+            for index in range(num_results):
+                hit, unavailable = self._result_hit(index, metadata, actual_flags)
+                hits.append(hit)
+                unavailable_fields.update(unavailable)
+            note = _result_diagnostic_note(requested_sort, actual_sort, unavailable_fields)
+            return SearchBatch(hits=tuple(hits), notes=(note,)) if note is not None else hits
+
+        return self._run_with_reset("search", operation)
+
+    def _run_with_reset(self, operation_name: str, operation: Callable[[], T]) -> T:
+        dll = self._ready_dll()
+        try:
+            try:
+                result = operation()
+            except QueryError:
+                raise
+            except (AttributeError, OSError, TypeError, ValueError, OverflowError, ctypes.ArgumentError):
+                raise QueryError(
+                    f"Everything SDK {operation_name} operation failed; verify the Everything runtime and retry."
+                ) from None
+        except BaseException:
+            try:
+                dll.Everything_Reset()
+            except BaseException:
+                # Reset must never replace the operation's primary failure.
+                pass
+            raise
+
+        try:
             dll.Everything_Reset()
+        except Exception:
+            raise QueryError(
+                f"Everything SDK reset failed after a successful {operation_name} operation; restart Everything and retry."
+            ) from None
+        return result
 
     def _ensure_ready(self) -> None:
         status = self.status()
@@ -228,7 +268,7 @@ class SdkIpcAdapter:
         dll = self._ready_dll()
         ok = dll.Everything_QueryW(True)
         if not ok:
-            error_code = dll.Everything_GetLastError()
+            error_code = int(dll.Everything_GetLastError())
             raise QueryError(f"Everything SDK query failed with error {error_code}; check syntax or call everything_syntax_help.")
 
     def _result_full_path(self, index: int) -> str:
@@ -237,21 +277,42 @@ class SdkIpcAdapter:
         while size <= 32768:
             buffer = ctypes.create_unicode_buffer(size)
             copied = int(dll.Everything_GetResultFullPathNameW(index, buffer, size))
+            if copied <= 0:
+                raise QueryError(
+                    f"Everything SDK did not return a full path for result {index}; retry the query or restart Everything."
+                )
             if copied < size - 1:
-                return buffer.value
+                path = buffer.value
+                if not path:
+                    raise QueryError(
+                        f"Everything SDK returned an empty full path for result {index}; retry the query or restart Everything."
+                    )
+                return path
             size *= 2
         raise QueryError("Everything SDK returned a path longer than the 32768 character safety buffer.")
 
-    def _result_hit(self, index: int, metadata: bool, actual_flags: int = METADATA_FLAGS) -> SearchHit:
+    def _result_hit(
+        self, index: int, metadata: bool, actual_flags: int = METADATA_FLAGS
+    ) -> tuple[SearchHit, set[str]]:
         path = self._result_full_path(index)
         if not metadata:
-            return SearchHit(path=path)
+            return SearchHit(path=path), set()
+        unavailable: set[str] = set()
+        size = self._result_size(index) if actual_flags & REQUEST_SIZE else None
+        date_modified = self._result_date_modified(index) if actual_flags & REQUEST_DATE_MODIFIED else None
+        attributes = self._result_attributes(index) if actual_flags & REQUEST_ATTRIBUTES else None
+        if actual_flags & REQUEST_SIZE and size is None:
+            unavailable.add("size")
+        if actual_flags & REQUEST_DATE_MODIFIED and date_modified is None:
+            unavailable.add("dateModified")
+        if actual_flags & REQUEST_ATTRIBUTES and attributes is None:
+            unavailable.add("attributes")
         return SearchHit(
             path=path,
-            size=self._result_size(index) if actual_flags & REQUEST_SIZE else None,
-            date_modified=self._result_date_modified(index) if actual_flags & REQUEST_DATE_MODIFIED else None,
-            attributes=self._result_attributes(index) if actual_flags & REQUEST_ATTRIBUTES else None,
-        )
+            size=size,
+            date_modified=date_modified,
+            attributes=attributes,
+        ), unavailable
 
     def _version(self) -> str | None:
         dll = self._ready_dll()
@@ -273,27 +334,28 @@ class SdkIpcAdapter:
             return None
 
     def _result_size(self, index: int) -> int | None:
-        value = ctypes.c_ulonglong()
-        if self._ready_dll().Everything_GetResultSize(index, ctypes.byref(value)):
-            return int(value.value)
-        return None
+        value = wintypes.LARGE_INTEGER()
+        if not self._ready_dll().Everything_GetResultSize(index, ctypes.byref(value)):
+            return None
+        size = int(value.value)
+        return size if size >= 0 else None
 
     def _result_date_modified(self, index: int) -> str | None:
-        value = ctypes.c_ulonglong()
+        value = wintypes.FILETIME()
         if not self._ready_dll().Everything_GetResultDateModified(index, ctypes.byref(value)):
             return None
-        raw_filetime = int(value.value)
+        raw_filetime = ((int(value.dwHighDateTime) & 0xFFFFFFFF) << 32) | (int(value.dwLowDateTime) & 0xFFFFFFFF)
         if raw_filetime in UNKNOWN_FILETIME_VALUES:
             return None
-        unix_seconds = (raw_filetime / 10_000_000) - WINDOWS_EPOCH_AS_UNIX_SECONDS
         try:
-            return datetime.fromtimestamp(unix_seconds, tz=timezone.utc).isoformat()
-        except (OverflowError, OSError, ValueError):
+            windows_epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
+            return (windows_epoch + timedelta(microseconds=raw_filetime // 10)).isoformat()
+        except (OverflowError, ValueError):
             return None
 
     def _result_attributes(self, index: int) -> str | None:
-        value = int(self._ready_dll().Everything_GetResultAttributes(index))
-        return f"0x{value:08X}" if value else None
+        value = int(self._ready_dll().Everything_GetResultAttributes(index)) & 0xFFFFFFFF
+        return None if value == INVALID_FILE_ATTRIBUTES else f"0x{value:08X}"
 
 
 def _sort_flag(sort: SortName) -> int:
@@ -303,14 +365,21 @@ def _sort_flag(sort: SortName) -> int:
         raise QueryError(f"Unsupported Everything SDK sort {sort!r}; use one of {', '.join(SORT_FLAGS)}.") from exc
 
 
-def _result_diagnostic_note(requested_sort: int, actual_sort: int, metadata: bool, actual_flags: int) -> str | None:
+def _missing_requested_fields(requested_flags: int, actual_flags: int) -> set[str]:
+    return {
+        name
+        for flag, name in REQUEST_FLAG_NAMES
+        if requested_flags & flag and not actual_flags & flag
+    }
+
+
+def _result_diagnostic_note(requested_sort: int, actual_sort: int, unavailable_fields: set[str]) -> str | None:
     differences: list[str] = []
     if actual_sort != requested_sort:
         differences.append(f"sort {actual_sort} (requested {requested_sort})")
-    if metadata:
-        missing = [name for flag, name in METADATA_FLAG_NAMES.items() if not actual_flags & flag]
-        if missing:
-            differences.append(f"unavailable metadata: {', '.join(missing)}")
+    unavailable = [name for _, name in REQUEST_FLAG_NAMES if name in unavailable_fields]
+    if unavailable:
+        differences.append(f"unavailable result fields: {', '.join(unavailable)}")
     if not differences:
         return None
     return "Everything returned different result capabilities: " + "; ".join(differences) + "."

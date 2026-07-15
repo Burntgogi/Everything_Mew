@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -21,10 +22,10 @@ class AdapterStatus:
     backend: BackendName
     es_cli_available: bool
     http_available: bool = False
+    notes: tuple[str, ...] = ()
     db_loaded: bool | None = None
     version: str | None = None
     target_machine: TargetMachineName | None = None
-    notes: tuple[str, ...] = ()
 
     def to_tool_result(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -64,8 +65,11 @@ class SearchHit:
 
 @dataclass(frozen=True)
 class SearchBatch:
-    hits: list[SearchHit]
+    hits: tuple[SearchHit, ...]
     notes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "hits", tuple(self.hits))
 
 
 def clamp_limit(limit: int | None) -> int:
@@ -74,7 +78,7 @@ def clamp_limit(limit: int | None) -> int:
     return max(1, min(int(limit), HARD_LIMIT))
 
 
-def path_first_items(items: list[SearchHit], metadata: bool) -> list[str] | list[dict[str, Any]]:
+def path_first_items(items: Sequence[SearchHit], metadata: bool) -> list[str] | list[dict[str, Any]]:
     if metadata:
         return [item.to_metadata_result() for item in items]
     return [item.path for item in items]

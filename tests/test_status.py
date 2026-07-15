@@ -41,3 +41,11 @@ def test_status_contract_omits_unavailable_optional_sdk_fields() -> None:
     assert "dbLoaded" not in result
     assert "version" not in result
     assert "targetMachine" not in result
+
+
+def test_status_contract_preserves_original_positional_notes_order() -> None:
+    status = contracts.AdapterStatus(True, True, "sdk-ipc", False, True, ("legacy positional note",))
+
+    assert status.http_available is True
+    assert status.notes == ("legacy positional note",)
+    assert status.db_loaded is None

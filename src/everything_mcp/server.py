@@ -74,7 +74,7 @@ def everything_search(
     except EverythingMcpError as exc:
         return {"countReturned": 0, "truncated": False, "items": [], "notes": [str(exc), syntax_help()]}
     if isinstance(search_result, SearchBatch):
-        hits = search_result.hits
+        hits = list(search_result.hits)
         notes = search_result.notes
     else:
         hits = search_result

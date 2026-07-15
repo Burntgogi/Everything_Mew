@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+import pytest
 from pytest import MonkeyPatch
 
 from everything_mcp.adapters.es_cli import EsCliAdapter
@@ -92,6 +93,14 @@ def test_search_batch_adds_diagnostic_note_without_changing_truncation() -> None
     assert result["truncated"] is True
     assert result["notes"] == ["SDK returned different result capabilities."]
     assert result["items"][-1] == r"C:\Work\file24.md"
+
+
+def test_search_batch_converts_hits_to_an_immutable_tuple() -> None:
+    batch = contracts.SearchBatch(hits=[contracts.SearchHit(path=r"C:\Work\file.md")])
+
+    assert batch.hits == (contracts.SearchHit(path=r"C:\Work\file.md"),)
+    with pytest.raises(AttributeError):
+        getattr(batch.hits, "append")(contracts.SearchHit(path=r"C:\Work\other.md"))
 
 
 def test_search_hard_caps_limit_to_100() -> None:
