@@ -36,19 +36,36 @@ official voidtools Everything SDK over local IPC.
 
 ## Install The Runtime
 
-From the repository root, run the tests and install the standard server
-dependencies:
+From the repository root, create the intended virtual environment, resolve its
+Python executable once, and install all development and server dependencies
+before running checks:
 
 ```powershell
-py -m pytest -q
-py -m pip check
-py -m pip install -e ".[server]"
+py -m venv .venv
+$python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
+& $python -m pip install -e ".[dev,server]"
+& $python -m pip check
+& $python -m pytest -q
 ```
 
-Verify the installed entrypoints:
+Keep using `$python` from this repository-root PowerShell session. Verify the
+entrypoints installed beside that interpreter:
 
 ```powershell
-py -c "import shutil; print(shutil.which('everything-mew')); print(shutil.which('everything-mcp')); print(shutil.which('everything-mew-lite'))"
+$scriptsDir = Split-Path -Parent $python
+$entrypointNames = @(
+    "everything-mew.exe",
+    "everything-mcp.exe",
+    "everything-mew-lite.exe",
+    "everything-mcp-lite.exe"
+)
+foreach ($entrypointName in $entrypointNames) {
+    $entrypoint = Join-Path $scriptsDir $entrypointName
+    if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) {
+        throw "Installed entrypoint is missing: $entrypoint"
+    }
+    Write-Host $entrypoint
+}
 ```
 
 The wheel installs the MCP runtime only. Install the OpenCode skill explicitly
@@ -80,7 +97,7 @@ New-Item -ItemType Directory -Path $sdkRoot -Force | Out-Null
 Invoke-WebRequest -Uri "https://www.voidtools.com/Everything-SDK.zip" -OutFile (Join-Path $sdkRoot "Everything-SDK.zip")
 Expand-Archive -Path (Join-Path $sdkRoot "Everything-SDK.zip") -DestinationPath $sdkRoot -Force
 
-$pointerBits = py -c "import struct; print(struct.calcsize('P') * 8)"
+$pointerBits = & $python -c "import struct; print(struct.calcsize('P') * 8)"
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to determine Python pointer width."
 }
@@ -201,7 +218,7 @@ if ((Split-Path -Leaf $dest) -ne $dllName) {
 if ($env:EVERYTHING_SDK_DLL -ne $dest.Replace("\", "/")) {
     throw "EVERYTHING_SDK_DLL does not match the selected DLL path."
 }
-py -c "from everything_mcp.server import create_mcp; print(type(create_mcp()).__name__)"
+& $python -c "from everything_mcp.server import create_mcp; print(type(create_mcp()).__name__)"
 ```
 
 Expected server type:
@@ -220,7 +237,7 @@ from everything_mcp.server import everything_status, everything_count, everythin
 print(everything_status())
 print(everything_count("ext:md", scope=r"C:\Path\to\project"))
 print(everything_search("ext:md", scope=r"C:\Path\to\project", limit=5, metadata=True))
-'@ | py -
+'@ | & $python -
 ```
 
 Expected healthy status:

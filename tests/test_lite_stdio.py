@@ -199,6 +199,28 @@ def test_sdk_guide_selects_dll_from_python_pointer_width_without_overwrite() -> 
     assert "Refusing to overwrite existing SDK DLL" in source
 
 
+def test_agent_guide_installs_clean_environment_before_running_checks() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    source = (repository_root / "docs/AGENT_INSTALLATION_GUIDE.md").read_text(encoding="utf-8")
+    install_section = source.split("## Install The Runtime", 1)[1].split("\n## ", 1)[0]
+    ordered_steps = (
+        "From the repository root",
+        "py -m venv .venv",
+        '$python = (Resolve-Path ".\\.venv\\Scripts\\python.exe").Path',
+        '& $python -m pip install -e ".[dev,server]"',
+        "& $python -m pip check",
+        "& $python -m pytest -q",
+        "$scriptsDir = Split-Path -Parent $python",
+    )
+
+    positions = [install_section.index(step) for step in ordered_steps]
+    assert positions == sorted(positions)
+    assert install_section.count("-m pip install") == 1
+    assert 'pip install -e ".[server]"' not in install_section
+    assert "py -m pip" not in install_section
+    assert "py -m pytest" not in install_section
+
+
 def test_agent_guide_reuses_pointer_width_selected_dll_without_overwrite() -> None:
     repository_root = Path(__file__).resolve().parents[1]
     source = (repository_root / "docs/AGENT_INSTALLATION_GUIDE.md").read_text(encoding="utf-8")
@@ -210,6 +232,7 @@ def test_agent_guide_reuses_pointer_width_selected_dll_without_overwrite() -> No
     assert "%USERPROFILE%" not in source
     assert r"C:\Users\<you>" not in source
     assert "struct.calcsize('P') * 8" in source
+    assert '$pointerBits = & $python -c "import struct; print(struct.calcsize(\'P\') * 8)"' in source
     assert '$dllName = "Everything64.dll"' in source
     assert '$dllName = "Everything32.dll"' in source
     assert 'Join-Path $sdkRoot "dll\\$dllName"' in source
