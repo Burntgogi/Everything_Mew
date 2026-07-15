@@ -256,7 +256,8 @@ def test_sdk_date_modified_ignores_unknown_and_out_of_range_filetime() -> None:
             self.raw_value = raw_value
 
         def Everything_GetResultDateModified(self, index: int, value_pointer: Any) -> bool:
-            value_pointer._obj.value = self.raw_value
+            value_pointer._obj.dwLowDateTime = self.raw_value & 0xFFFFFFFF
+            value_pointer._obj.dwHighDateTime = (self.raw_value >> 32) & 0xFFFFFFFF
             return True
 
     adapter = sdk_ipc.SdkIpcAdapter.__new__(sdk_ipc.SdkIpcAdapter)
