@@ -72,6 +72,20 @@ SAFETY_MATRIX = (
     ("filename, extension, and exclusion", "README.md ext:md !node_modules", None, False),
     ("project extension and exclusion", "ext:md !node_modules", r"C:\\Work\\project", False),
     ("content real extension and exclusion", 'content:foo ext:md !"ignored ext:md"', r"C:\\Work\\project", False),
+    ("OR date filter with universal branch", "dm:today | *", None, True),
+    ("OR size filter with universal branch", "size:>0|*", None, True),
+    ("OR path filter with universal branch", r"path:C:\Work|*", None, True),
+    ("scoped filename with universal OR branch", "foo | *", r"C:\Work\project", True),
+    ("universal regular expression", "regex:.*", None, True),
+    ("quoted universal regular expression", 'regex:"^.*$"', None, True),
+    ("grouped universal OR branch", "<report|*> ext:md", None, True),
+    ("grouped narrowing alternatives", "<report|summary> ext:md", None, False),
+    ("OR alternatives share filename constraint", "report ext:md|ext:txt", None, False),
+    ("negated group with positive filter", "ext:md !<node_modules|.git>", r"C:\Work\project", False),
+    ("negated AND group expands broadly", "!<foo bar>", r"C:\Work\project", True),
+    ("malformed unclosed group", "<report|summary ext:md", None, True),
+    ("malformed empty OR branch", "report||summary ext:md", None, True),
+    ("malformed unclosed quote", 'path:"C:\\Work report', None, True),
 )
 
 
@@ -96,6 +110,29 @@ def test_exclusion_only_query_recognizes_quoted_phrases(query: str) -> None:
 )
 def test_positive_narrowing_filter_uses_only_real_positive_filter_terms(query: str, expected: bool) -> None:
     assert query_module.has_positive_narrowing_filter(query) is expected
+
+
+@pytest.mark.parametrize(
+    "content_function",
+    ("content", "ansicontent", "utf8content", "utf16content", "utf16becontent"),
+)
+def test_every_content_alias_requires_non_root_scope_and_filter(content_function: str) -> None:
+    query = f"{content_function}:needle"
+
+    assert server.is_broad_query(query, scope=r"C:\Work\project") is True
+    assert server.is_broad_query(f"{query} ext:md", scope=r"C:\Work\project") is False
+    assert server.is_broad_query(f"{query} ext:md", scope="C:\\") is True
+
+
+def test_content_policy_is_enforced_per_or_alternative() -> None:
+    assert server.is_broad_query(
+        "<utf8content:needle>|<report ext:md>",
+        scope=r"C:\Work\project",
+    ) is True
+    assert server.is_broad_query(
+        "<utf8content:needle ext:txt>|<report ext:md>",
+        scope=r"C:\Work\project",
+    ) is False
 
 
 @pytest.mark.parametrize(
@@ -231,7 +268,10 @@ def test_sdk_adapter_configures_ctypes_signatures() -> None:
             self.Everything_SetRequestFlags = FakeFunction()
             self.Everything_SetSort = FakeFunction()
             self.Everything_SetMax = FakeFunction()
+            self.Everything_SetReplyWindow = FakeFunction()
+            self.Everything_SetReplyID = FakeFunction()
             self.Everything_QueryW = FakeFunction()
+            self.Everything_IsQueryReply = FakeFunction()
             self.Everything_GetTotResults = FakeFunction()
             self.Everything_GetNumResults = FakeFunction()
             self.Everything_GetLastError = FakeFunction()

@@ -22,6 +22,16 @@ change only when the release branch is cut.
   skill must be installed explicitly from the repository or a plugin.
 - Add security reporting, contribution, SDK environment, and reproducible
   release guidance.
+- Parse OR alternatives, grouping, quoting, and negation before broad-query
+  checks; reject malformed and universal branches without calling a backend.
+- Apply the expensive-content policy to every supported content function and
+  every possible query branch.
+- Replace the unbounded synchronous SDK query with the official asynchronous
+  reply-window flow and a 15-second deadline, serialized through reset.
+- Decode ES metadata CSV as UTF-8 and retrieve SDK paths with the documented
+  required-length call, including the exact 32,767-character limit.
+- Make `everything-mew-lite` the primary always-on configuration example while
+  retaining FastMCP as an optional compatibility path.
 
 ### 한국어
 
@@ -34,3 +44,13 @@ change only when the release branch is cut.
 - Python 배포 파일에는 MCP 런타임만 포함되며, 에이전트 스킬은 저장소 또는
   플러그인에서 명시적으로 설치해야 함을 분명히 합니다.
 - 보안 신고, 기여, SDK 환경 변수, 재현 가능한 릴리스 절차를 문서화합니다.
+- 광범위 쿼리 검사 전에 OR 대안, 그룹, 인용, 부정을 파싱하고, 잘못된 문법과
+  전체 일치 분기는 백엔드를 호출하지 않고 거부합니다.
+- 지원하는 모든 콘텐츠 함수와 가능한 각 쿼리 분기에 고비용 콘텐츠 정책을
+  적용합니다.
+- 무제한 동기 SDK 쿼리를 공식 비동기 응답 창 흐름과 15초 제한으로 교체하고,
+  Reset까지 직렬화합니다.
+- ES 메타데이터 CSV를 UTF-8로 디코딩하고, 문서화된 필요 길이 호출로 SDK
+  경로를 가져와 정확히 32,767자인 경로까지 처리합니다.
+- 항상 켜 두는 기본 설정 예시는 `everything-mew-lite`로 변경하고 FastMCP는
+  선택 가능한 호환 경로로 유지합니다.

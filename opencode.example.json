@@ -2,7 +2,7 @@
   "mcp": {
     "everything-mew": {
       "type": "local",
-      "command": ["everything-mew"],
+      "command": ["everything-mew-lite"],
       "enabled": true,
       "environment": {
         "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import ctypes
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +38,10 @@ class SignatureDll:
             "Everything_SetRequestFlags",
             "Everything_SetSort",
             "Everything_SetMax",
+            "Everything_SetReplyWindow",
+            "Everything_SetReplyID",
             "Everything_QueryW",
+            "Everything_IsQueryReply",
             "Everything_GetTotResults",
             "Everything_GetNumResults",
             "Everything_GetLastError",
@@ -118,10 +124,15 @@ class QueryDll(StatusDll):
         self.reset_calls = 0
         self.cleanup_calls = 0
         self.path_calls = 0
+        self.path_size_queries = 0
+        self.path_copy_sizes: list[int] = []
         self.size_calls = 0
         self.date_calls = 0
         self.attribute_calls = 0
         self.call_order: list[str] = []
+        self.query_wait_values: list[bool] = []
+        self.reply_windows: list[int] = []
+        self.reply_ids: list[int] = []
 
     def Everything_SetSearchW(self, query: str) -> None:
         self.call_order.append("set-search")
@@ -138,9 +149,19 @@ class QueryDll(StatusDll):
     def Everything_SetMax(self, limit: int) -> None:
         self.limit = limit
 
+    def Everything_SetReplyWindow(self, window: int) -> None:
+        self.reply_windows.append(window)
+
+    def Everything_SetReplyID(self, reply_id: int) -> None:
+        self.reply_ids.append(reply_id)
+
     def Everything_QueryW(self, wait: bool) -> bool:
         self.call_order.append("query")
+        self.query_wait_values.append(wait)
         return self.failure != "query"
+
+    def Everything_IsQueryReply(self, message: int, w_param: int, l_param: int, reply_id: int) -> bool:
+        return False
 
     def Everything_GetTotResults(self) -> int | BadInt:
         return BadInt() if self.failure == "copy" else 7
@@ -166,8 +187,14 @@ class QueryDll(StatusDll):
             raise ValueError("result copy failed")
         if self.failure == "empty-path":
             return 0
-        buffer.value = self.paths[index]
-        return len(buffer.value)
+        path = self.paths[index]
+        if buffer is None:
+            self.path_size_queries += 1
+            return len(path)
+        self.path_copy_sizes.append(size)
+        copied = min(len(path), max(0, size - 1))
+        buffer.value = path[:copied]
+        return copied
 
     def Everything_GetResultSize(self, index: int, value_pointer: Any) -> bool:
         self.size_calls += 1
@@ -206,6 +233,8 @@ def _adapter(dll: object, everything_exe: Path = Path(r"C:\Program Files\Everyth
     adapter.config = EverythingConfig(everything_exe=everything_exe)
     adapter._dll = dll
     adapter._load_error = None
+    adapter._operation_lock = threading.RLock()
+    adapter._reply_id = 0
     return adapter
 
 
@@ -236,6 +265,14 @@ def test_sdk_adapter_configures_exact_new_ctypes_signatures() -> None:
         assert function.restype is ctypes.wintypes.DWORD
     assert dll.Everything_Reset.argtypes == []
     assert dll.Everything_Reset.restype is None
+    assert dll.Everything_SetReplyWindow.argtypes == [ctypes.wintypes.HWND]
+    assert dll.Everything_SetReplyID.argtypes == [ctypes.wintypes.DWORD]
+    assert dll.Everything_IsQueryReply.argtypes == [
+        ctypes.wintypes.UINT,
+        ctypes.wintypes.WPARAM,
+        ctypes.wintypes.LPARAM,
+        ctypes.wintypes.DWORD,
+    ]
     assert dll.Everything_GetResultSize.argtypes == [
         ctypes.wintypes.DWORD,
         ctypes.POINTER(ctypes.wintypes.LARGE_INTEGER),
@@ -455,6 +492,44 @@ def test_zero_or_failed_full_path_copy_never_publishes_empty_path() -> None:
     assert dll.reset_calls == 1
 
 
+def test_full_path_uses_required_length_query_and_accepts_exact_windows_limit() -> None:
+    path = "C:\\" + "a" * 32764
+    dll = QueryDll(paths=(path,))
+    adapter = _adapter(dll)
+
+    assert adapter._result_full_path(0) == path
+    assert dll.path_size_queries == 1
+    assert dll.path_copy_sizes == [32768]
+
+
+def test_full_path_rejects_above_windows_limit_before_allocating_copy_buffer() -> None:
+    dll = QueryDll(paths=("C:\\" + "a" * 32765,))
+    adapter = _adapter(dll)
+
+    with pytest.raises(QueryError, match="32767"):
+        adapter._result_full_path(0)
+
+    assert dll.path_size_queries == 1
+    assert dll.path_copy_sizes == []
+
+
+def test_full_path_rejects_copy_length_that_differs_from_required_length() -> None:
+    class ShortCopyDll(QueryDll):
+        def Everything_GetResultFullPathNameW(self, index: int, buffer: Any, size: int) -> int:
+            required = super().Everything_GetResultFullPathNameW(index, None, 0)
+            if buffer is None:
+                return required
+            buffer.value = self.paths[index][:-1]
+            self.path_copy_sizes.append(size)
+            return required - 1
+
+    dll = ShortCopyDll()
+    adapter = _adapter(dll)
+
+    with pytest.raises(QueryError, match="changed while copying"):
+        adapter._result_full_path(0)
+
+
 def test_sdk_diagnostics_cross_adapter_boundary_and_omit_unavailable_metadata() -> None:
     actual_flags = sdk_ipc.REQUEST_FULL_PATH | sdk_ipc.REQUEST_SIZE
     dll = QueryDll(actual_sort=sdk_ipc.EVERYTHING_SORT_NAME_ASCENDING, actual_flags=actual_flags)
@@ -553,3 +628,125 @@ def test_sdk_count_and_search_never_call_cleanup_even_through_helpers() -> None:
         getattr(adapter, operation)("ext:py", scope=r"C:\Work")
 
         assert dll.cleanup_calls == 0
+
+
+class FakeReplyWindow:
+    def __init__(self, *, reply: bool, hwnd: int = 1234) -> None:
+        self.hwnd = hwnd
+        self.reply = reply
+        self.wait_calls: list[float] = []
+        self.close_calls = 0
+
+    def wait_for_reply(self, timeout_seconds: float) -> bool:
+        self.wait_calls.append(timeout_seconds)
+        return self.reply
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+@pytest.fixture(autouse=True)
+def successful_fake_win32_reply(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sdk_ipc,
+        "_create_query_reply_window",
+        lambda *_: FakeReplyWindow(reply=True),
+    )
+
+
+def test_sdk_query_uses_async_reply_window_and_bounded_wait(monkeypatch: MonkeyPatch) -> None:
+    dll = QueryDll()
+    window = FakeReplyWindow(reply=True)
+    created: list[tuple[object, int]] = []
+
+    def create_window(received_dll: object, reply_id: int) -> FakeReplyWindow:
+        created.append((received_dll, reply_id))
+        return window
+
+    monkeypatch.setattr(sdk_ipc, "_create_query_reply_window", create_window)
+    adapter = _adapter(dll)
+
+    assert adapter.count("ext:py", scope=r"C:\Work") == 7
+    assert dll.query_wait_values == [False]
+    assert dll.reply_windows == [window.hwnd, 0]
+    assert dll.reply_ids == [created[0][1]]
+    assert created[0][0] is dll
+    assert created[0][1] > 0
+    assert window.wait_calls == [sdk_ipc.SDK_QUERY_TIMEOUT_SECONDS]
+    assert window.close_calls == 1
+    assert dll.reset_calls == 1
+
+
+def test_sdk_timeout_resets_and_late_reply_cannot_poison_retry(monkeypatch: MonkeyPatch) -> None:
+    dll = QueryDll()
+    windows = [FakeReplyWindow(reply=False, hwnd=1001), FakeReplyWindow(reply=True, hwnd=1002)]
+
+    def create_window(received_dll: object, reply_id: int) -> FakeReplyWindow:
+        assert received_dll is dll
+        assert reply_id > 0
+        return windows.pop(0)
+
+    monkeypatch.setattr(sdk_ipc, "_create_query_reply_window", create_window)
+    adapter = _adapter(dll)
+
+    with pytest.raises(QueryError, match="timed out"):
+        adapter.count("ext:py", scope=r"C:\Work")
+
+    assert adapter.count("ext:py", scope=r"C:\Work") == 7
+    assert dll.reply_ids[0] != dll.reply_ids[1]
+    assert dll.reply_windows == [1001, 0, 1002, 0]
+    assert dll.reset_calls == 2
+
+
+def test_sdk_reply_window_is_closed_when_async_query_post_fails(monkeypatch: MonkeyPatch) -> None:
+    dll = QueryDll(failure="query")
+    window = FakeReplyWindow(reply=True)
+    monkeypatch.setattr(sdk_ipc, "_create_query_reply_window", lambda *_: window)
+    adapter = _adapter(dll)
+
+    with pytest.raises(QueryError, match="error 0"):
+        adapter.count("ext:py", scope=r"C:\Work")
+
+    assert window.wait_calls == []
+    assert window.close_calls == 1
+    assert dll.reply_windows == [window.hwnd, 0]
+    assert dll.reset_calls == 1
+
+
+def test_sdk_serializes_shared_query_and_reset_state(monkeypatch: MonkeyPatch) -> None:
+    dll = QueryDll()
+    first_waiting = threading.Event()
+    release_first = threading.Event()
+    factory_calls: list[int] = []
+
+    class BlockingReplyWindow(FakeReplyWindow):
+        def __init__(self, call_number: int) -> None:
+            super().__init__(reply=True, hwnd=2000 + call_number)
+            self.call_number = call_number
+
+        def wait_for_reply(self, timeout_seconds: float) -> bool:
+            if self.call_number == 1:
+                first_waiting.set()
+                assert release_first.wait(timeout=1)
+            return super().wait_for_reply(timeout_seconds)
+
+    def create_window(received_dll: object, reply_id: int) -> BlockingReplyWindow:
+        assert received_dll is dll
+        factory_calls.append(reply_id)
+        return BlockingReplyWindow(len(factory_calls))
+
+    monkeypatch.setattr(sdk_ipc, "_create_query_reply_window", create_window)
+    adapter = _adapter(dll)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(adapter.count, "ext:py", r"C:\Work")
+        assert first_waiting.wait(timeout=1)
+        second = executor.submit(adapter.count, "ext:txt", r"C:\Work")
+        time.sleep(0.05)
+        assert len(factory_calls) == 1
+        release_first.set()
+        assert first.result(timeout=1) == 7
+        assert second.result(timeout=1) == 7
+
+    assert len(factory_calls) == 2
+    assert dll.reset_calls == 2

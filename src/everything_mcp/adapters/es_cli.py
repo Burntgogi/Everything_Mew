@@ -132,9 +132,16 @@ class EsCliAdapter:
                 ]
             )
         args.append(self._safe_query_arg(query, scope))
-        completed = self._run(args)
         if metadata:
-            return _parse_metadata_csv(completed.stdout)
+            completed_bytes = self._run_bytes(args)
+            try:
+                csv_output = completed_bytes.stdout.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                raise QueryError(
+                    "ES CLI metadata CSV is not valid UTF-8; verify that the installed es.exe supports UTF-8 CSV output."
+                ) from None
+            return _parse_metadata_csv(csv_output)
+        completed = self._run(args)
         return [SearchHit(path=line.strip()) for line in completed.stdout.splitlines() if line.strip()]
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -156,6 +163,28 @@ class EsCliAdapter:
             raise QueryError(f"ES CLI query timed out after {DEFAULT_ES_TIMEOUT_SECONDS} seconds; refine the query or check Everything runtime status.") from exc
         except UnicodeError:
             raise QueryError(LOCALE_DECODE_ERROR_NOTE) from None
+        except OSError as exc:
+            raise QueryError(f"ES CLI could not be executed at {self.es_exe}: {exc}") from exc
+
+    def _run_bytes(self, args: list[str]) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                [str(self.es_exe), *args],
+                check=True,
+                capture_output=True,
+                text=False,
+                shell=False,
+                timeout=DEFAULT_ES_TIMEOUT_SECONDS,
+            )
+        except subprocess.CalledProcessError as exc:
+            raw_stderr = exc.stderr if isinstance(exc.stderr, bytes) else b""
+            stderr = raw_stderr.decode("utf-8", errors="replace").strip() or "no stderr"
+            note = _return_code_note(exc.returncode)
+            raise QueryError(f"ES CLI query failed with exit code {exc.returncode}: {note}. Details: {stderr}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise QueryError(
+                f"ES CLI query timed out after {DEFAULT_ES_TIMEOUT_SECONDS} seconds; refine the query or check Everything runtime status."
+            ) from exc
         except OSError as exc:
             raise QueryError(f"ES CLI could not be executed at {self.es_exe}: {exc}") from exc
 

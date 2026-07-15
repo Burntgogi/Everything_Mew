@@ -9,12 +9,7 @@ from .adapters import EverythingAdapter, select_adapter
 from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, SearchBatch, SortName, clamp_limit, path_first_items
 from .errors import BackendUnavailableError, EverythingMcpError
 from .query import (
-    has_path_signal,
-    has_positive_narrowing_filter,
-    has_root_path_expression,
-    is_exclusion_only_query,
-    is_extension_only_query,
-    is_root_scope,
+    is_safe_query,
 )
 from .syntax import syntax_help
 
@@ -98,29 +93,7 @@ def everything_syntax_help(topic: str | None = None) -> str:
 
 
 def is_broad_query(query: str | None, scope: str | None = None) -> bool:
-    text = (query or "").strip()
-    if not text:
-        return True
-    lowered = text.lower()
-    if lowered in {"*", "*.*", "file:", "folder:", "c:\\", "c:/"}:
-        return True
-    if is_root_scope(scope) or has_root_path_expression(text):
-        return True
-    if is_exclusion_only_query(text):
-        return True
-    if lowered.startswith("content:") and not (
-        scope and not is_root_scope(scope) and has_positive_narrowing_filter(lowered)
-    ):
-        return True
-    if scope and scope.strip():
-        return False
-    has_path = has_path_signal(lowered)
-    has_narrowing_token = has_positive_narrowing_filter(lowered)
-    if not has_path and not has_narrowing_token:
-        return True
-    if is_extension_only_query(text) and not has_path:
-        return True
-    return False
+    return not is_safe_query((query or "").strip(), scope)
 
 
 def create_mcp() -> Any:

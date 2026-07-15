@@ -212,10 +212,12 @@ def test_search_uses_explicit_ascending_sort_arguments(monkeypatch: MonkeyPatch,
 def test_metadata_uses_deterministic_switches_and_parses_recorded_korean_csv(monkeypatch: MonkeyPatch) -> None:
     calls: list[list[str]] = []
     recorded_csv = '\ufeff"C:\\자료\\보고서, 최종.csv","123456","2026-07-15T12:34:56Z","A"\n'
+    run_options: list[dict[str, Any]] = []
 
-    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         calls.append(args)
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout=recorded_csv, stderr="")
+        run_options.append(kwargs)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=recorded_csv.encode("utf-8-sig"), stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -233,6 +235,15 @@ def test_metadata_uses_deterministic_switches_and_parses_recorded_korean_csv(mon
         "3",
         "-attribs",
     ]
+    assert run_options == [
+        {
+            "check": True,
+            "capture_output": True,
+            "text": False,
+            "shell": False,
+            "timeout": es_cli.DEFAULT_ES_TIMEOUT_SECONDS,
+        }
+    ]
     assert hits == [
         SearchHit(
             path=r"C:\자료\보고서, 최종.csv",
@@ -244,8 +255,9 @@ def test_metadata_uses_deterministic_switches_and_parses_recorded_korean_csv(mon
 
 
 def test_metadata_empty_size_maps_to_none(monkeypatch: MonkeyPatch) -> None:
-    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout='"C:\\Work\\empty.txt","","2026-07-15T12:34:56Z","A"\n', stderr="")
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        output = '"C:\\Work\\empty.txt","","2026-07-15T12:34:56Z","A"\n'.encode("utf-8")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=output, stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -265,10 +277,20 @@ def test_metadata_empty_size_maps_to_none(monkeypatch: MonkeyPatch) -> None:
     ],
 )
 def test_metadata_rejects_invalid_csv_rows(monkeypatch: MonkeyPatch, output: str, message: str) -> None:
-    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout=output, stderr="")
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=output.encode("utf-8"), stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     with pytest.raises(QueryError, match=message):
+        _adapter().search("ext:txt", metadata=True)
+
+
+def test_metadata_rejects_invalid_utf8_without_locale_fallback(monkeypatch: MonkeyPatch) -> None:
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=b"\x81\n", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(QueryError, match="UTF-8"):
         _adapter().search("ext:txt", metadata=True)

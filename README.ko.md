@@ -45,6 +45,15 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 - 서버 버전은 설치된 패키지 메타데이터에서 읽고, 소스 체크아웃에서는 `pyproject.toml`을 구조적으로 파싱해 대체 값을 사용합니다.
 - Windows CI에서 Python 3.11과 3.14, strict 타입 검사, 두 배포 형식, 설치 wheel의 lite 핸드셰이크를 검증합니다.
 - lite stdio 동작, 읽기 전용 도구 메타데이터, 어댑터 선택, 광범위 쿼리 안전장치, 문법 검증에 대한 계약/안전 테스트를 보강했습니다.
+- 광범위 쿼리 검증은 인용된 항목, 부정, `< >` 그룹, 모든 `|` 대안을
+  파싱하며, 잘못된 문법이나 전체 일치 대안은 실패 폐쇄 방식으로 거부합니다.
+- Everything의 모든 콘텐츠 함수(`content:`, `ansicontent:`,
+  `utf8content:`, `utf16content:`, `utf16becontent:`)는 가능한 각 분기에서
+  루트가 아닌 범위와 추가 인덱스 축소 필터를 요구합니다.
+- SDK 쿼리는 무제한 동기 DLL 호출 대신 공식 비동기 응답 창 API와 15초
+  제한 메시지 대기를 사용합니다.
+- ES 메타데이터 CSV를 UTF-8로 명시적으로 디코딩하고, SDK 결과 경로는 공식
+  필요 길이 조회 후 정확한 크기로 복사합니다.
 
 기능 브랜치의 패키지 버전은 `0.1.0`으로 유지하며, `0.2.0`은 아직 배포되지
 않은 예정 버전입니다. 한영 릴리스 노트는 [변경 기록](CHANGELOG.md)을
@@ -78,7 +87,13 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 1. Windows에 Everything을 설치하고 실행합니다.
 2. 공식 Everything SDK를 다운로드하고 압축을 풉니다.
 3. `Everything64.dll` 또는 `Everything32.dll`을 신뢰할 수 있는 로컬 지원 디렉터리에 둡니다.
-4. 서버 지원을 포함해 패키지를 설치합니다.
+4. 권장 lite 진입점용 런타임 전용 패키지를 설치합니다.
+
+   ```powershell
+   py -m pip install -e .
+   ```
+
+   FastMCP 경로가 필요한 경우에만 선택 사항을 추가해 설치합니다.
 
    ```powershell
    py -m pip install -e ".[server]"
@@ -101,7 +116,7 @@ OpenCode 스타일 등록 예시:
   "mcp": {
     "everything-mew": {
       "type": "local",
-      "command": ["everything-mew"],
+      "command": ["everything-mew-lite"],
       "enabled": true,
       "environment": {
         "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
@@ -124,7 +139,9 @@ $env:EVERYTHING_SDK_DLL = $dllPath.Replace("\", "/")
 opencode
 ```
 
-호환성을 위해 기존 명령 이름 `everything-mcp`도 유지합니다.
+이 기본 예시는 낮은 대기 메모리 진입점을 사용합니다. FastMCP 진입점
+`everything-mew`와 기존 명령 이름 `everything-mcp`, `everything-mcp-lite`는
+호환성 또는 명시적 선택을 위해 계속 제공합니다.
 
 Codex Desktop처럼 활성 세션마다 stdio MCP 프로세스를 유지하는 호스트에서는
 낮은 대기 메모리용 진입점을 우선 사용하세요.
@@ -146,7 +163,7 @@ FastAPI를 시작하거나 요구하지 않으며 FastMCP도 필요하지 않습
 - 패키지 import 시 FastMCP 서버 모듈을 바로 불러오지 않도록 lazy-loading으로 바꿨습니다.
 - MCP `initialize` 응답에 읽기 전용 서버 지침을 포함합니다.
 - 백엔드를 불러오기 전에 MCP `params`와 도구 인자 타입을 검증합니다.
-- 기존 FastMCP 경로인 `everything-mew`와 `everything-mcp`는 그대로 유지합니다.
+- 선택 사항인 FastMCP 경로용 `everything-mew`와 `everything-mcp`를 계속 제공합니다.
 
 ## 저장소 구성
 

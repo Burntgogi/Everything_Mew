@@ -45,6 +45,15 @@ hosts that keep one server process alive per active session.
 - The server version comes from installed package metadata, with a structural `pyproject.toml` fallback in source checkouts.
 - Windows CI verifies Python 3.11 and 3.14, strict typing, both distribution formats, and the installed-wheel lite handshake.
 - Contract and safety tests were expanded around lite stdio behavior, read-only tool metadata, adapter selection, broad-query safety, and syntax validation.
+- Broad-query validation now parses quoted terms, negation, `< >` groups, and
+  every `|` alternative; malformed or universal alternatives fail closed.
+- All Everything content functions (`content:`, `ansicontent:`,
+  `utf8content:`, `utf16content:`, and `utf16becontent:`) require a non-root
+  scope and an additional indexed narrowing filter in every possible branch.
+- SDK queries use the official asynchronous reply-window API with a bounded
+  15-second message wait instead of an unbounded synchronous DLL call.
+- ES metadata CSV is decoded explicitly as UTF-8, and SDK result paths use the
+  official required-length query before an exact-size copy.
 
 The feature branch package version remains `0.1.0`; `0.2.0` is a planned,
 unreleased target. See the bilingual [changelog](CHANGELOG.md).
@@ -77,7 +86,13 @@ Official sources:
 1. Install and start Everything on Windows.
 2. Download and extract the official Everything SDK.
 3. Put `Everything64.dll` or `Everything32.dll` in a trusted local support directory.
-4. Install this package with server support:
+4. Install the runtime-only package for the recommended lite entrypoint:
+
+   ```powershell
+   py -m pip install -e .
+   ```
+
+   Install the optional FastMCP path only when it is required:
 
    ```powershell
    py -m pip install -e ".[server]"
@@ -101,7 +116,7 @@ Example OpenCode-style registration:
   "mcp": {
     "everything-mew": {
       "type": "local",
-      "command": ["everything-mew"],
+      "command": ["everything-mew-lite"],
       "enabled": true,
       "environment": {
         "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
@@ -124,7 +139,9 @@ $env:EVERYTHING_SDK_DLL = $dllPath.Replace("\", "/")
 opencode
 ```
 
-The legacy command name `everything-mcp` is also kept for compatibility.
+This primary example uses the low-standby entrypoint. The FastMCP entrypoint
+`everything-mew` and legacy command names `everything-mcp` and
+`everything-mcp-lite` remain available for compatibility or explicit use.
 
 For Codex Desktop or other hosts that keep one stdio MCP process alive per
 active session, prefer the low-standby entrypoint:
@@ -146,7 +163,7 @@ Low-standby mode changes:
 - keeps package import lightweight by lazy-loading the FastMCP server module;
 - advertises read-only MCP instructions during `initialize`;
 - validates MCP `params` and tool argument types before loading the backend;
-- keeps `everything-mew` and `everything-mcp` unchanged for the existing FastMCP path.
+- keeps `everything-mew` and `everything-mcp` available for the optional FastMCP path.
 
 ## Repository contents
 

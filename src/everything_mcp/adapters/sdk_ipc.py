@@ -8,12 +8,16 @@ crashes.
 from __future__ import annotations
 
 import ctypes
+import math
+import os
 import platform
+import threading
+import time
 from ctypes import wintypes
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from everything_mcp.config import EverythingConfig
 from everything_mcp.contracts import AdapterStatus, SearchBatch, SearchHit, SortName, TargetMachineName
@@ -40,6 +44,15 @@ METADATA_FLAGS = REQUEST_FULL_PATH | REQUEST_SIZE | REQUEST_DATE_MODIFIED | REQU
 PATH_ONLY_FLAGS = REQUEST_FULL_PATH
 UNKNOWN_FILETIME_VALUES = {0, 0xFFFFFFFFFFFFFFFF}
 INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+MAX_WINDOWS_PATH_CHARACTERS = 32767
+SDK_QUERY_TIMEOUT_SECONDS = 15.0
+WM_COPYDATA = 0x004A
+PM_REMOVE = 0x0001
+QS_ALLINPUT = 0x04FF
+MWMO_INPUTAVAILABLE = 0x0004
+WAIT_TIMEOUT = 0x00000102
+WAIT_FAILED = 0xFFFFFFFF
+HWND_MESSAGE = -3
 TARGET_MACHINES: dict[int, TargetMachineName] = {1: "x86", 2: "x64", 3: "ARM", 4: "ARM64"}
 REQUEST_FLAG_NAMES = (
     (REQUEST_FULL_PATH, "fullPath"),
@@ -50,6 +63,187 @@ REQUEST_FLAG_NAMES = (
 T = TypeVar("T")
 
 
+_WNDPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_ssize_t,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+)
+
+
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = (
+        ("style", wintypes.UINT),
+        ("lpfnWndProc", _WNDPROC),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE),
+        ("hIcon", wintypes.HANDLE),
+        ("hCursor", wintypes.HANDLE),
+        ("hbrBackground", wintypes.HANDLE),
+        ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR),
+    )
+
+
+class _QueryReplyWindow(Protocol):
+    hwnd: int
+
+    def wait_for_reply(self, timeout_seconds: float) -> bool: ...
+
+    def close(self) -> None: ...
+
+
+class _Win32QueryReplyWindow:
+    def __init__(self, dll: Any, reply_id: int) -> None:
+        self._dll = dll
+        self._reply_id = reply_id
+        self._received = False
+        self._callback_failed = False
+        self._closed = False
+        self._user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._configure_win32()
+        self._window_proc = _WNDPROC(self._handle_message)
+        self._instance = self._kernel32.GetModuleHandleW(None)
+        self._class_name = (
+            f"EverythingMewReply_{os.getpid()}_{threading.get_ident()}_{reply_id}_{id(self)}"
+        )
+        window_class = _WNDCLASSW(
+            0,
+            self._window_proc,
+            0,
+            0,
+            self._instance,
+            None,
+            None,
+            None,
+            None,
+            self._class_name,
+        )
+        self._atom = int(self._user32.RegisterClassW(ctypes.byref(window_class)))
+        if self._atom == 0:
+            raise OSError("Could not register the Everything SDK reply window class.")
+        hwnd = self._user32.CreateWindowExW(
+            0,
+            self._class_name,
+            self._class_name,
+            0,
+            0,
+            0,
+            0,
+            0,
+            wintypes.HWND(HWND_MESSAGE),
+            None,
+            self._instance,
+            None,
+        )
+        if not hwnd:
+            self._user32.UnregisterClassW(self._class_name, self._instance)
+            raise OSError("Could not create the Everything SDK reply window.")
+        self.hwnd = int(hwnd)
+
+    def _configure_win32(self) -> None:
+        self._kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        self._kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        self._user32.RegisterClassW.argtypes = [ctypes.POINTER(_WNDCLASSW)]
+        self._user32.RegisterClassW.restype = wintypes.ATOM
+        self._user32.CreateWindowExW.argtypes = [
+            wintypes.DWORD,
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.HWND,
+            wintypes.HMENU,
+            wintypes.HINSTANCE,
+            wintypes.LPVOID,
+        ]
+        self._user32.CreateWindowExW.restype = wintypes.HWND
+        self._user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        self._user32.DefWindowProcW.restype = ctypes.c_ssize_t
+        self._user32.MsgWaitForMultipleObjectsEx.argtypes = [
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.HANDLE),
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        self._user32.MsgWaitForMultipleObjectsEx.restype = wintypes.DWORD
+        self._user32.PeekMessageW.argtypes = [
+            ctypes.POINTER(wintypes.MSG),
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.UINT,
+            wintypes.UINT,
+        ]
+        self._user32.PeekMessageW.restype = wintypes.BOOL
+        self._user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        self._user32.TranslateMessage.restype = wintypes.BOOL
+        self._user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+        self._user32.DispatchMessageW.restype = ctypes.c_ssize_t
+        self._user32.DestroyWindow.argtypes = [wintypes.HWND]
+        self._user32.DestroyWindow.restype = wintypes.BOOL
+        self._user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+        self._user32.UnregisterClassW.restype = wintypes.BOOL
+
+    def _handle_message(self, hwnd: int, message: int, w_param: int, l_param: int) -> int:
+        if message == WM_COPYDATA:
+            try:
+                if self._dll.Everything_IsQueryReply(message, w_param, l_param, self._reply_id):
+                    self._received = True
+                    return 1
+            except BaseException:
+                self._callback_failed = True
+                return 0
+        return int(self._user32.DefWindowProcW(hwnd, message, w_param, l_param))
+
+    def wait_for_reply(self, timeout_seconds: float) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        message = wintypes.MSG()
+        while not self._received:
+            if self._callback_failed:
+                raise OSError("Everything SDK reply processing failed.")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            wait_milliseconds = min(max(1, math.ceil(remaining * 1000)), 0xFFFFFFFE)
+            wait_result = int(
+                self._user32.MsgWaitForMultipleObjectsEx(
+                    0,
+                    None,
+                    wait_milliseconds,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                )
+            )
+            if wait_result == WAIT_TIMEOUT:
+                return False
+            if wait_result == WAIT_FAILED:
+                raise OSError("Everything SDK reply wait failed.")
+            while self._user32.PeekMessageW(ctypes.byref(message), None, 0, 0, PM_REMOVE):
+                self._user32.TranslateMessage(ctypes.byref(message))
+                self._user32.DispatchMessageW(ctypes.byref(message))
+        return True
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        destroy_ok = bool(self._user32.DestroyWindow(self.hwnd))
+        unregister_ok = bool(self._user32.UnregisterClassW(self._class_name, self._instance))
+        if not destroy_ok or not unregister_ok:
+            raise OSError("Everything SDK reply window cleanup failed.")
+
+
+def _create_query_reply_window(dll: Any, reply_id: int) -> _QueryReplyWindow:
+    return _Win32QueryReplyWindow(dll, reply_id)
+
+
 class SdkIpcAdapter:
     name = "sdk-ipc"
 
@@ -57,6 +251,8 @@ class SdkIpcAdapter:
         self.config = config or EverythingConfig.from_env()
         self._dll: Any | None = None
         self._load_error: str | None = None
+        self._operation_lock = threading.RLock()
+        self._reply_id = 0
         self._load_dll()
 
     def _candidate_dll(self) -> Path | None:
@@ -116,8 +312,19 @@ class SdkIpcAdapter:
         self._dll.Everything_SetSort.restype = None
         self._dll.Everything_SetMax.argtypes = [wintypes.DWORD]
         self._dll.Everything_SetMax.restype = None
+        self._dll.Everything_SetReplyWindow.argtypes = [wintypes.HWND]
+        self._dll.Everything_SetReplyWindow.restype = None
+        self._dll.Everything_SetReplyID.argtypes = [wintypes.DWORD]
+        self._dll.Everything_SetReplyID.restype = None
         self._dll.Everything_QueryW.argtypes = [wintypes.BOOL]
         self._dll.Everything_QueryW.restype = wintypes.BOOL
+        self._dll.Everything_IsQueryReply.argtypes = [
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+            wintypes.DWORD,
+        ]
+        self._dll.Everything_IsQueryReply.restype = wintypes.BOOL
         self._dll.Everything_GetTotResults.argtypes = []
         self._dll.Everything_GetTotResults.restype = wintypes.DWORD
         self._dll.Everything_GetNumResults.argtypes = []
@@ -134,6 +341,10 @@ class SdkIpcAdapter:
         self._dll.Everything_GetResultAttributes.restype = wintypes.DWORD
 
     def status(self) -> AdapterStatus:
+        with self._lock():
+            return self._status_unlocked()
+
+    def _status_unlocked(self) -> AdapterStatus:
         notes: list[str] = []
         everything_installed = self.config.everything_exe.exists()
         if not everything_installed:
@@ -222,31 +433,39 @@ class SdkIpcAdapter:
         return self._run_with_reset("search", operation)
 
     def _run_with_reset(self, operation_name: str, operation: Callable[[], T]) -> T:
-        dll = self._ready_dll()
-        try:
+        with self._lock():
+            dll = self._ready_dll()
             try:
-                result = operation()
-            except QueryError:
+                try:
+                    result = operation()
+                except QueryError:
+                    raise
+                except (AttributeError, OSError, TypeError, ValueError, OverflowError, ctypes.ArgumentError):
+                    raise QueryError(
+                        f"Everything SDK {operation_name} operation failed; verify the Everything runtime and retry."
+                    ) from None
+            except BaseException:
+                try:
+                    dll.Everything_Reset()
+                except BaseException:
+                    # Reset must never replace the operation's primary failure.
+                    pass
                 raise
-            except (AttributeError, OSError, TypeError, ValueError, OverflowError, ctypes.ArgumentError):
-                raise QueryError(
-                    f"Everything SDK {operation_name} operation failed; verify the Everything runtime and retry."
-                ) from None
-        except BaseException:
+
             try:
                 dll.Everything_Reset()
-            except BaseException:
-                # Reset must never replace the operation's primary failure.
-                pass
-            raise
+            except Exception:
+                raise QueryError(
+                    f"Everything SDK reset failed after a successful {operation_name} operation; restart Everything and retry."
+                ) from None
+            return result
 
-        try:
-            dll.Everything_Reset()
-        except Exception:
-            raise QueryError(
-                f"Everything SDK reset failed after a successful {operation_name} operation; restart Everything and retry."
-            ) from None
-        return result
+    def _lock(self) -> threading.RLock:
+        lock = getattr(self, "_operation_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._operation_lock = lock
+        return lock
 
     def _ensure_ready(self) -> None:
         status = self.status()
@@ -266,30 +485,66 @@ class SdkIpcAdapter:
 
     def _query(self) -> None:
         dll = self._ready_dll()
-        ok = dll.Everything_QueryW(True)
-        if not ok:
-            error_code = int(dll.Everything_GetLastError())
-            raise QueryError(f"Everything SDK query failed with error {error_code}; check syntax or call everything_syntax_help.")
+        reply_id = self._next_reply_identifier()
+        reply_window = _create_query_reply_window(dll, reply_id)
+        primary_failure = False
+        cleanup_failed = False
+        try:
+            dll.Everything_SetReplyWindow(reply_window.hwnd)
+            dll.Everything_SetReplyID(reply_id)
+            ok = dll.Everything_QueryW(False)
+            if not ok:
+                error_code = int(dll.Everything_GetLastError())
+                raise QueryError(
+                    f"Everything SDK query failed with error {error_code}; check syntax or call everything_syntax_help."
+                )
+            if not reply_window.wait_for_reply(SDK_QUERY_TIMEOUT_SECONDS):
+                raise QueryError(
+                    f"Everything SDK query timed out after {SDK_QUERY_TIMEOUT_SECONDS:g} seconds; refine the query or restart Everything."
+                )
+        except BaseException:
+            primary_failure = True
+            raise
+        finally:
+            try:
+                dll.Everything_SetReplyWindow(0)
+            except BaseException:
+                cleanup_failed = True
+            try:
+                reply_window.close()
+            except BaseException:
+                cleanup_failed = True
+            if cleanup_failed and not primary_failure:
+                raise QueryError("Everything SDK reply window cleanup failed; restart Everything and retry.")
+
+    def _next_reply_identifier(self) -> int:
+        reply_id = (getattr(self, "_reply_id", 0) + 1) & 0xFFFFFFFF
+        self._reply_id = reply_id or 1
+        return self._reply_id
 
     def _result_full_path(self, index: int) -> str:
         dll = self._ready_dll()
-        size = 260
-        while size <= 32768:
-            buffer = ctypes.create_unicode_buffer(size)
-            copied = int(dll.Everything_GetResultFullPathNameW(index, buffer, size))
-            if copied <= 0:
-                raise QueryError(
-                    f"Everything SDK did not return a full path for result {index}; retry the query or restart Everything."
-                )
-            if copied < size - 1:
-                path = buffer.value
-                if not path:
-                    raise QueryError(
-                        f"Everything SDK returned an empty full path for result {index}; retry the query or restart Everything."
-                    )
-                return path
-            size *= 2
-        raise QueryError("Everything SDK returned a path longer than the 32768 character safety buffer.")
+        required = int(dll.Everything_GetResultFullPathNameW(index, None, 0))
+        if required <= 0:
+            raise QueryError(
+                f"Everything SDK did not return a full path for result {index}; retry the query or restart Everything."
+            )
+        if required > MAX_WINDOWS_PATH_CHARACTERS:
+            raise QueryError(
+                f"Everything SDK returned a path longer than the {MAX_WINDOWS_PATH_CHARACTERS} character Windows limit."
+            )
+        buffer = ctypes.create_unicode_buffer(required + 1)
+        copied = int(dll.Everything_GetResultFullPathNameW(index, buffer, required + 1))
+        path = buffer.value
+        if copied != required or len(path) != required:
+            raise QueryError(
+                f"Everything SDK result {index} changed while copying its full path; retry the query."
+            )
+        if not path:
+            raise QueryError(
+                f"Everything SDK returned an empty full path for result {index}; retry the query or restart Everything."
+            )
+        return path
 
     def _result_hit(
         self, index: int, metadata: bool, actual_flags: int = METADATA_FLAGS
