@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import PureWindowsPath
 
-POSITIVE_FILTER_PATTERN = re.compile(r"(?:^|\s)(?:path:|ext:|dm:|dc:|rc:|size:|regex:)", re.IGNORECASE)
+POSITIVE_FILTER_PATTERN = re.compile(r"^(?:path:|ext:|dm:|dc:|rc:|size:|regex:)", re.IGNORECASE)
 DRIVE_ROOT_PATTERN = re.compile(r"^[a-z]:[\\/]*$", re.IGNORECASE)
 UNC_ROOT_PATTERN = re.compile(r"^[\\/]{2}[^\\/]+(?:[\\/]+[^\\/]+)?[\\/]*$")
 
@@ -57,7 +57,7 @@ def has_root_path_expression(query: str) -> bool:
 
 
 def has_positive_narrowing_filter(query: str) -> bool:
-    return bool(POSITIVE_FILTER_PATTERN.search(query))
+    return any(POSITIVE_FILTER_PATTERN.match(term) for term in _positive_terms(query))
 
 
 def has_exclusion(query: str) -> bool:

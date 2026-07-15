@@ -47,6 +47,13 @@ SAFETY_MATRIX = (
     ("mixed quoted and unquoted exclusions", '!"node modules" !.git', None, True),
     ("extension with trailing exclusion", "ext:md !node_modules", None, True),
     ("extension with leading exclusion", "!node_modules ext:md", None, True),
+    ("content with excluded extension text", 'content:foo !"ignored ext:md"', r"C:\Work\project", True),
+    (
+        "content with excluded size and date text",
+        'content:foo !"ignored size:100 dm:2024-01-01"',
+        r"C:\Work\project",
+        True,
+    ),
     ("drive root", "C:\\", None, True),
     ("quoted drive root", r'"C:\"', None, True),
     ("slash-normalized drive root", "C:/", None, True),
@@ -64,6 +71,7 @@ SAFETY_MATRIX = (
     ("unscoped positive filter", "report ext:md", None, False),
     ("filename, extension, and exclusion", "README.md ext:md !node_modules", None, False),
     ("project extension and exclusion", "ext:md !node_modules", r"C:\\Work\\project", False),
+    ("content real extension and exclusion", 'content:foo ext:md !"ignored ext:md"', r"C:\\Work\\project", False),
 )
 
 
@@ -75,6 +83,19 @@ def test_broad_query_safety_matrix(_name: str, query: str, scope: str | None, ex
 @pytest.mark.parametrize("query", ('!"node modules"', '!"node modules" !.git'))
 def test_exclusion_only_query_recognizes_quoted_phrases(query: str) -> None:
     assert query_module.is_exclusion_only_query(query) is True
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    (
+        ('content:foo !"ignored ext:md"', False),
+        ('content:foo !"ignored size:100 dm:2024-01-01"', False),
+        ('content:foo "ignored ext:md"', False),
+        ('content:foo EXT:md !"ignored size:100"', True),
+    ),
+)
+def test_positive_narrowing_filter_uses_only_real_positive_filter_terms(query: str, expected: bool) -> None:
+    assert query_module.has_positive_narrowing_filter(query) is expected
 
 
 @pytest.mark.parametrize(
