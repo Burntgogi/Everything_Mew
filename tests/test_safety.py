@@ -10,6 +10,7 @@ es_cli = import_module("everything_mcp.adapters.es_cli")
 sdk_ipc = import_module("everything_mcp.adapters.sdk_ipc")
 config_module = import_module("everything_mcp.config")
 errors = import_module("everything_mcp.errors")
+query_module = import_module("everything_mcp.query")
 server = import_module("everything_mcp.server")
 
 
@@ -41,6 +42,11 @@ class SafetyAdapter:
 SAFETY_MATRIX = (
     ("single exclusion", "!node_modules", None, True),
     ("multiple exclusions", "!node_modules !.git", None, True),
+    ("quoted exclusion", '!"node modules"', None, True),
+    ("quoted exclusion scope", '!"node modules"', r"C:\Work\project", True),
+    ("mixed quoted and unquoted exclusions", '!"node modules" !.git', None, True),
+    ("extension with trailing exclusion", "ext:md !node_modules", None, True),
+    ("extension with leading exclusion", "!node_modules ext:md", None, True),
     ("drive root", "C:\\", None, True),
     ("quoted drive root", r'"C:\"', None, True),
     ("slash-normalized drive root", "C:/", None, True),
@@ -56,12 +62,19 @@ SAFETY_MATRIX = (
     ("local project filename", "README.md", r"C:\\Work\\project", False),
     ("UNC project filter", "ext:md", r"\\server\share\project", False),
     ("unscoped positive filter", "report ext:md", None, False),
+    ("filename, extension, and exclusion", "README.md ext:md !node_modules", None, False),
+    ("project extension and exclusion", "ext:md !node_modules", r"C:\\Work\\project", False),
 )
 
 
 @pytest.mark.parametrize(("_name", "query", "scope", "expected_broad"), SAFETY_MATRIX)
 def test_broad_query_safety_matrix(_name: str, query: str, scope: str | None, expected_broad: bool) -> None:
     assert server.is_broad_query(query, scope) is expected_broad
+
+
+@pytest.mark.parametrize("query", ('!"node modules"', '!"node modules" !.git'))
+def test_exclusion_only_query_recognizes_quoted_phrases(query: str) -> None:
+    assert query_module.is_exclusion_only_query(query) is True
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ from .query import (
     has_positive_narrowing_filter,
     has_root_path_expression,
     is_exclusion_only_query,
+    is_extension_only_query,
     is_root_scope,
 )
 from .syntax import syntax_help
@@ -109,7 +110,7 @@ def is_broad_query(query: str | None, scope: str | None = None) -> bool:
     has_narrowing_token = has_positive_narrowing_filter(lowered)
     if not has_path and not has_narrowing_token:
         return True
-    if lowered.startswith("ext:") and not has_path and " " not in lowered:
+    if is_extension_only_query(text) and not has_path:
         return True
     return False
 

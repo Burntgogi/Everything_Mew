@@ -6,8 +6,6 @@ import re
 from pathlib import PureWindowsPath
 
 POSITIVE_FILTER_PATTERN = re.compile(r"(?:^|\s)(?:path:|ext:|dm:|dc:|rc:|size:|regex:)", re.IGNORECASE)
-EXCLUSION_PATTERN = re.compile(r"(?:^|\s)!\S")
-QUERY_TERM_PATTERN = re.compile(r'(?:^|\s)(path:"(?:[^"]|"")*"|\S+)', re.IGNORECASE)
 DRIVE_ROOT_PATTERN = re.compile(r"^[a-z]:[\\/]*$", re.IGNORECASE)
 UNC_ROOT_PATTERN = re.compile(r"^[\\/]{2}[^\\/]+(?:[\\/]+[^\\/]+)?[\\/]*$")
 
@@ -63,12 +61,17 @@ def has_positive_narrowing_filter(query: str) -> bool:
 
 
 def has_exclusion(query: str) -> bool:
-    return bool(EXCLUSION_PATTERN.search(query))
+    return any(_is_exclusion_term(term) for term in _query_terms(query))
 
 
 def is_exclusion_only_query(query: str) -> bool:
     terms = _query_terms(query)
-    return bool(terms) and has_exclusion(query) and all(term.startswith("!") for term in terms)
+    return bool(terms) and has_exclusion(query) and all(_is_exclusion_term(term) for term in terms)
+
+
+def is_extension_only_query(query: str) -> bool:
+    positive_terms = _positive_terms(query)
+    return len(positive_terms) == 1 and positive_terms[0].lower().startswith("ext:")
 
 
 def has_strong_filter(query: str) -> bool:
@@ -87,7 +90,45 @@ def has_path_signal(query: str) -> bool:
 
 
 def _query_terms(query: str) -> tuple[str, ...]:
-    return tuple(match.group(1) for match in QUERY_TERM_PATTERN.finditer(query))
+    """Return whitespace-separated terms while keeping quoted phrases intact."""
+    terms: list[str] = []
+    position = 0
+    while position < len(query):
+        while position < len(query) and query[position].isspace():
+            position += 1
+        if position == len(query):
+            break
+
+        start = position
+        if query[position] == "!":
+            position += 1
+        if query[position : position + 5].lower() == "path:":
+            position += 5
+
+        if position < len(query) and query[position] == '"':
+            position += 1
+            while position < len(query):
+                if query[position] != '"':
+                    position += 1
+                elif position + 1 < len(query) and query[position + 1] == '"':
+                    position += 2
+                else:
+                    position += 1
+                    break
+        else:
+            while position < len(query) and not query[position].isspace():
+                position += 1
+
+        terms.append(query[start:position])
+    return tuple(terms)
+
+
+def _is_exclusion_term(term: str) -> bool:
+    return term.startswith("!")
+
+
+def _positive_terms(query: str) -> tuple[str, ...]:
+    return tuple(term for term in _query_terms(query) if not _is_exclusion_term(term))
 
 
 def _unquote_path(value: str) -> str:
