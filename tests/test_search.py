@@ -77,6 +77,23 @@ def test_search_metadata_is_opt_in() -> None:
     assert result["items"] == [{"path": r"C:\Work\README.md", "size": 10, "dateModified": "2026-04-26", "attributes": "A"}]
 
 
+def test_search_batch_adds_diagnostic_note_without_changing_truncation() -> None:
+    hits = [contracts.SearchHit(path=fr"C:\Work\file{i}.md") for i in range(30)]
+    adapter = SearchAdapter(hits)
+
+    def search_with_note(**_: object) -> object:
+        return contracts.SearchBatch(hits=hits[:26], notes=("SDK returned different result capabilities.",))
+
+    adapter.search = search_with_note  # type: ignore[assignment]
+
+    result = server.everything_search("ext:md", scope=r"C:\Work", adapter=adapter)
+
+    assert result["countReturned"] == 25
+    assert result["truncated"] is True
+    assert result["notes"] == ["SDK returned different result capabilities."]
+    assert result["items"][-1] == r"C:\Work\file24.md"
+
+
 def test_search_hard_caps_limit_to_100() -> None:
     hits = [contracts.SearchHit(path=fr"C:\Work\file{i}.md") for i in range(150)]
     adapter = SearchAdapter(hits)

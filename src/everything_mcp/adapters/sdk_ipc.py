@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from everything_mcp.config import EverythingConfig
-from everything_mcp.contracts import AdapterStatus, SearchHit, SortName
+from everything_mcp.contracts import AdapterStatus, SearchBatch, SearchHit, SortName, TargetMachineName
 from everything_mcp.errors import BackendUnavailableError, QueryError
 from everything_mcp.query import compose_query
 
@@ -39,6 +39,12 @@ METADATA_FLAGS = REQUEST_FULL_PATH | REQUEST_SIZE | REQUEST_DATE_MODIFIED | REQU
 PATH_ONLY_FLAGS = REQUEST_FULL_PATH
 WINDOWS_EPOCH_AS_UNIX_SECONDS = 11644473600
 UNKNOWN_FILETIME_VALUES = {0, 0xFFFFFFFFFFFFFFFF}
+TARGET_MACHINES: dict[int, TargetMachineName] = {1: "x86", 2: "x64", 3: "ARM", 4: "ARM64"}
+METADATA_FLAG_NAMES = {
+    REQUEST_SIZE: "size",
+    REQUEST_DATE_MODIFIED: "dateModified",
+    REQUEST_ATTRIBUTES: "attributes",
+}
 
 
 class SdkIpcAdapter:
@@ -65,16 +71,37 @@ class SdkIpcAdapter:
         try:
             self._dll = ctypes.WinDLL(str(dll_path))
             self._configure_functions()
-        except OSError as exc:
-            self._load_error = f"Could not load Everything SDK DLL ({dll_path}): {exc}"
+        except OSError:
+            self._dll = None
+            self._load_error = (
+                "Could not load the configured Everything SDK DLL; verify the configured path, process bitness, "
+                "and DLL dependencies."
+            )
         except AttributeError as exc:
-            self._load_error = f"ctypes WinDLL is unavailable on this platform: {exc}"
+            self._dll = None
+            self._load_error = f"Everything SDK DLL loading or required function lookup failed: {exc}"
 
     def _configure_functions(self) -> None:
         if self._dll is None:
             return
+        self._dll.Everything_IsDBLoaded.argtypes = []
+        self._dll.Everything_IsDBLoaded.restype = wintypes.BOOL
         self._dll.Everything_GetMajorVersion.argtypes = []
         self._dll.Everything_GetMajorVersion.restype = wintypes.DWORD
+        self._dll.Everything_GetMinorVersion.argtypes = []
+        self._dll.Everything_GetMinorVersion.restype = wintypes.DWORD
+        self._dll.Everything_GetRevision.argtypes = []
+        self._dll.Everything_GetRevision.restype = wintypes.DWORD
+        self._dll.Everything_GetBuildNumber.argtypes = []
+        self._dll.Everything_GetBuildNumber.restype = wintypes.DWORD
+        self._dll.Everything_GetTargetMachine.argtypes = []
+        self._dll.Everything_GetTargetMachine.restype = wintypes.DWORD
+        self._dll.Everything_GetResultListSort.argtypes = []
+        self._dll.Everything_GetResultListSort.restype = wintypes.DWORD
+        self._dll.Everything_GetResultListRequestFlags.argtypes = []
+        self._dll.Everything_GetResultListRequestFlags.restype = wintypes.DWORD
+        self._dll.Everything_Reset.argtypes = []
+        self._dll.Everything_Reset.restype = None
         self._dll.Everything_SetSearchW.argtypes = [wintypes.LPCWSTR]
         self._dll.Everything_SetSearchW.restype = None
         self._dll.Everything_SetRequestFlags.argtypes = [wintypes.DWORD]
@@ -111,22 +138,48 @@ class SdkIpcAdapter:
             return AdapterStatus(everything_installed, False, "none", False, notes=tuple(notes))
 
         try:
-            version = self._dll.Everything_GetMajorVersion()
+            db_loaded = bool(self._dll.Everything_IsDBLoaded())
+            last_error = int(self._dll.Everything_GetLastError()) if not db_loaded else 0
         except (AttributeError, OSError) as exc:
-            notes.append(f"Everything SDK loaded but runtime/version check failed: {exc}")
+            notes.append(f"Everything SDK loaded but the IPC readiness check failed: {exc}")
             return AdapterStatus(everything_installed, False, "none", False, notes=tuple(notes))
-        running = int(version) > 0
-        if not running:
-            notes.append("Everything SDK did not report a running Everything runtime; start Everything and retry.")
-        return AdapterStatus(everything_installed, running, "sdk-ipc" if running else "none", False, notes=tuple(notes))
+
+        if not db_loaded and last_error != 0:
+            notes.append(f"Everything SDK IPC readiness check failed with error {last_error}; start Everything and retry.")
+            return AdapterStatus(
+                everything_installed,
+                False,
+                "none",
+                False,
+                db_loaded=False,
+                notes=tuple(notes),
+            )
+
+        version = self._version()
+        target_machine = self._target_machine()
+        if not db_loaded:
+            notes.append("Everything is running but its database is still loading; retry when dbLoaded is true.")
+        return AdapterStatus(
+            everything_installed,
+            True,
+            "sdk-ipc",
+            False,
+            db_loaded=db_loaded,
+            version=version,
+            target_machine=target_machine,
+            notes=tuple(notes),
+        )
 
     def count(self, query: str, scope: str | None = None) -> int:
         self._ensure_ready()
         dll = self._ready_dll()
-        self._set_query(query, scope)
-        dll.Everything_SetRequestFlags(PATH_ONLY_FLAGS)
-        self._query()
-        return int(dll.Everything_GetTotResults())
+        try:
+            self._set_query(query, scope)
+            dll.Everything_SetRequestFlags(PATH_ONLY_FLAGS)
+            self._query()
+            return int(dll.Everything_GetTotResults())
+        finally:
+            dll.Everything_Reset()
 
     def search(
         self,
@@ -135,24 +188,32 @@ class SdkIpcAdapter:
         limit: int = 25,
         sort: SortName = "name",
         metadata: bool = False,
-    ) -> list[SearchHit]:
+    ) -> list[SearchHit] | SearchBatch:
         self._ensure_ready()
         dll = self._ready_dll()
-        self._set_query(query, scope)
-        dll.Everything_SetSort(_sort_flag(sort))
-        dll.Everything_SetRequestFlags(METADATA_FLAGS if metadata else PATH_ONLY_FLAGS)
-        dll.Everything_SetMax(limit)
-        self._query()
-        num_results = int(dll.Everything_GetNumResults())
-        hits: list[SearchHit] = []
-        for index in range(num_results):
-            hits.append(self._result_hit(index, metadata))
-        return hits
+        requested_sort = _sort_flag(sort)
+        requested_flags = METADATA_FLAGS if metadata else PATH_ONLY_FLAGS
+        try:
+            self._set_query(query, scope)
+            dll.Everything_SetSort(requested_sort)
+            dll.Everything_SetRequestFlags(requested_flags)
+            dll.Everything_SetMax(limit)
+            self._query()
+            actual_sort = int(dll.Everything_GetResultListSort())
+            actual_flags = int(dll.Everything_GetResultListRequestFlags())
+            num_results = int(dll.Everything_GetNumResults())
+            hits = [self._result_hit(index, metadata, actual_flags) for index in range(num_results)]
+            note = _result_diagnostic_note(requested_sort, actual_sort, metadata, actual_flags)
+            return SearchBatch(hits=hits, notes=(note,)) if note is not None else hits
+        finally:
+            dll.Everything_Reset()
 
     def _ensure_ready(self) -> None:
         status = self.status()
         if status.backend != "sdk-ipc" or not status.everything_running:
             raise BackendUnavailableError("Everything SDK/IPC is unavailable: " + "; ".join(status.notes))
+        if status.db_loaded is not True:
+            raise BackendUnavailableError("Everything SDK database is still loading; retry when dbLoaded is true.")
 
     def _ready_dll(self) -> Any:
         if self._dll is None:
@@ -181,16 +242,35 @@ class SdkIpcAdapter:
             size *= 2
         raise QueryError("Everything SDK returned a path longer than the 32768 character safety buffer.")
 
-    def _result_hit(self, index: int, metadata: bool) -> SearchHit:
+    def _result_hit(self, index: int, metadata: bool, actual_flags: int = METADATA_FLAGS) -> SearchHit:
         path = self._result_full_path(index)
         if not metadata:
             return SearchHit(path=path)
         return SearchHit(
             path=path,
-            size=self._result_size(index),
-            date_modified=self._result_date_modified(index),
-            attributes=self._result_attributes(index),
+            size=self._result_size(index) if actual_flags & REQUEST_SIZE else None,
+            date_modified=self._result_date_modified(index) if actual_flags & REQUEST_DATE_MODIFIED else None,
+            attributes=self._result_attributes(index) if actual_flags & REQUEST_ATTRIBUTES else None,
         )
+
+    def _version(self) -> str | None:
+        dll = self._ready_dll()
+        try:
+            parts = (
+                int(dll.Everything_GetMajorVersion()),
+                int(dll.Everything_GetMinorVersion()),
+                int(dll.Everything_GetRevision()),
+                int(dll.Everything_GetBuildNumber()),
+            )
+        except (AttributeError, OSError, TypeError, ValueError):
+            return None
+        return ".".join(str(part) for part in parts) if any(parts) else None
+
+    def _target_machine(self) -> TargetMachineName | None:
+        try:
+            return TARGET_MACHINES.get(int(self._ready_dll().Everything_GetTargetMachine()))
+        except (AttributeError, OSError, TypeError, ValueError):
+            return None
 
     def _result_size(self, index: int) -> int | None:
         value = ctypes.c_ulonglong()
@@ -221,3 +301,16 @@ def _sort_flag(sort: SortName) -> int:
         return SORT_FLAGS[sort]
     except KeyError as exc:
         raise QueryError(f"Unsupported Everything SDK sort {sort!r}; use one of {', '.join(SORT_FLAGS)}.") from exc
+
+
+def _result_diagnostic_note(requested_sort: int, actual_sort: int, metadata: bool, actual_flags: int) -> str | None:
+    differences: list[str] = []
+    if actual_sort != requested_sort:
+        differences.append(f"sort {actual_sort} (requested {requested_sort})")
+    if metadata:
+        missing = [name for flag, name in METADATA_FLAG_NAMES.items() if not actual_flags & flag]
+        if missing:
+            differences.append(f"unavailable metadata: {', '.join(missing)}")
+    if not differences:
+        return None
+    return "Everything returned different result capabilities: " + "; ".join(differences) + "."

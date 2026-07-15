@@ -218,7 +218,15 @@ def test_sdk_adapter_configures_ctypes_signatures() -> None:
 
     class FakeDll:
         def __init__(self) -> None:
+            self.Everything_IsDBLoaded = FakeFunction()
             self.Everything_GetMajorVersion = FakeFunction()
+            self.Everything_GetMinorVersion = FakeFunction()
+            self.Everything_GetRevision = FakeFunction()
+            self.Everything_GetBuildNumber = FakeFunction()
+            self.Everything_GetTargetMachine = FakeFunction()
+            self.Everything_GetResultListSort = FakeFunction()
+            self.Everything_GetResultListRequestFlags = FakeFunction()
+            self.Everything_Reset = FakeFunction()
             self.Everything_SetSearchW = FakeFunction()
             self.Everything_SetRequestFlags = FakeFunction()
             self.Everything_SetSort = FakeFunction()

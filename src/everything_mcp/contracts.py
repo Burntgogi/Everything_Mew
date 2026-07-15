@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 BackendName = Literal["sdk-ipc", "es-cli", "http", "none"]
 SortName = Literal["name", "path", "size", "date_modified"]
+TargetMachineName = Literal["x86", "x64", "ARM", "ARM64"]
 
 DEFAULT_LIMIT = 25
 HARD_LIMIT = 100
@@ -20,10 +21,13 @@ class AdapterStatus:
     backend: BackendName
     es_cli_available: bool
     http_available: bool = False
+    db_loaded: bool | None = None
+    version: str | None = None
+    target_machine: TargetMachineName | None = None
     notes: tuple[str, ...] = ()
 
     def to_tool_result(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "everythingInstalled": self.everything_installed,
             "everythingRunning": self.everything_running,
             "backend": self.backend,
@@ -31,6 +35,13 @@ class AdapterStatus:
             "httpAvailable": self.http_available,
             "notes": list(self.notes),
         }
+        if self.db_loaded is not None:
+            result["dbLoaded"] = self.db_loaded
+        if self.version is not None:
+            result["version"] = self.version
+        if self.target_machine is not None:
+            result["targetMachine"] = self.target_machine
+        return result
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,12 @@ class SearchHit:
         if self.attributes is not None:
             item["attributes"] = self.attributes
         return item
+
+
+@dataclass(frozen=True)
+class SearchBatch:
+    hits: list[SearchHit]
+    notes: tuple[str, ...] = ()
 
 
 def clamp_limit(limit: int | None) -> int:

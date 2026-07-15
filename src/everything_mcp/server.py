@@ -6,7 +6,7 @@ from importlib import import_module
 from typing import Any
 
 from .adapters import EverythingAdapter, select_adapter
-from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, SortName, clamp_limit, path_first_items
+from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, SearchBatch, SortName, clamp_limit, path_first_items
 from .errors import BackendUnavailableError, EverythingMcpError
 from .query import (
     has_path_signal,
@@ -68,11 +68,17 @@ def everything_search(
         }
     selected = adapter or select_adapter()
     try:
-        hits = selected.search(query=query, scope=scope, limit=safe_limit + 1, sort=sort, metadata=metadata)
+        search_result = selected.search(query=query, scope=scope, limit=safe_limit + 1, sort=sort, metadata=metadata)
     except BackendUnavailableError as exc:
         return {"countReturned": 0, "truncated": False, "items": [], "notes": [str(exc)]}
     except EverythingMcpError as exc:
         return {"countReturned": 0, "truncated": False, "items": [], "notes": [str(exc), syntax_help()]}
+    if isinstance(search_result, SearchBatch):
+        hits = search_result.hits
+        notes = search_result.notes
+    else:
+        hits = search_result
+        notes = ()
     truncated = len(hits) > safe_limit
     visible = hits[:safe_limit]
     result: dict[str, Any] = {
@@ -82,6 +88,8 @@ def everything_search(
     }
     if safe_limit == HARD_LIMIT and truncated:
         result["recommendation"] = "result hard cap reached; refine by path, filename, extension, date, or size"
+    if notes:
+        result["notes"] = list(notes)
     return result
 
 
