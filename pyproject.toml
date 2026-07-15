@@ -42,10 +42,11 @@ include = [
     "/README.md",
     "/README.ko.md",
     "/SECURITY.md",
-    "/docs",
+    "/docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md",
     "/opencode.example.json",
     "/pyproject.toml",
     "/src",
+    "/tests",
 ]
 
 [tool.pytest.ini_options]

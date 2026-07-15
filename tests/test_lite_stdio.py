@@ -13,6 +13,8 @@ from typing import cast
 import pytest
 from pytest import CaptureFixture, MonkeyPatch
 
+MISSING_PARAMS = object()
+
 
 def request(
     method: str,
@@ -25,17 +27,18 @@ def request(
     return message
 
 
+def valid_initialize_params(protocol_version: str = "2025-11-25") -> dict[str, Any]:
+    return {
+        "protocolVersion": protocol_version,
+        "capabilities": {},
+        "clientInfo": {"name": "test-client", "version": "0"},
+    }
+
+
 def initialized_session(lite_stdio: Any, protocol_version: str = "2025-11-25") -> Any:
     session = lite_stdio.LiteSession()
     response = lite_stdio.handle_message(
-        request(
-            "initialize",
-            {
-                "protocolVersion": protocol_version,
-                "capabilities": {},
-                "clientInfo": {"name": "test-client", "version": "0"},
-            },
-        ),
+        request("initialize", valid_initialize_params(protocol_version)),
         session,
     )
     assert response["result"]["protocolVersion"] == protocol_version
@@ -94,6 +97,64 @@ def test_package_version_literal_exists_only_in_pyproject() -> None:
     for relative_path in ("src/everything_mcp/version.py", "src/everything_mcp/lite_stdio.py"):
         source = (repository_root / relative_path).read_text(encoding="utf-8")
         assert package_version not in source
+
+
+def test_release_manifest_and_ci_cover_public_sdist_and_fastmcp() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    pyproject = tomllib.loads((repository_root / "pyproject.toml").read_text(encoding="utf-8"))
+    sdist_config = cast(dict[str, object], pyproject["tool"]["hatch"]["build"]["targets"]["sdist"])
+    included_paths = cast(list[str], sdist_config["include"])
+
+    assert "/docs" not in included_paths
+    assert "/docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md" in included_paths
+    assert "/tests" in included_paths
+    assert all("SDK_DESIGN_REVIEW" not in path for path in included_paths)
+
+    workflow_path = repository_root / ".github/workflows/ci.yml"
+    if not workflow_path.is_file():
+        pytest.skip("Repository CI workflow is intentionally excluded from the source distribution.")
+
+    workflow = workflow_path.read_text(encoding="utf-8")
+    assert 'python -m pip install -e ".[dev,server]"' in workflow
+    assert "create_mcp()" in workflow
+    assert "server.list_tools()" in workflow
+    for tool_name in (
+        "everything_status",
+        "everything_count",
+        "everything_search",
+        "everything_syntax_help",
+    ):
+        assert tool_name in workflow
+
+
+def test_opencode_examples_use_host_environment_substitution() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config = cast(
+        dict[str, Any],
+        json.loads((repository_root / "opencode.example.json").read_text(encoding="utf-8")),
+    )
+    environment = config["mcp"]["everything-mew"]["environment"]
+    assert environment["EVERYTHING_SDK_DLL"] == "{env:EVERYTHING_SDK_DLL}"
+
+    for relative_path in ("README.md", "README.ko.md", "docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md"):
+        source = (repository_root / relative_path).read_text(encoding="utf-8")
+        sdk_environment_lines = [line for line in source.splitlines() if '"EVERYTHING_SDK_DLL"' in line]
+        assert sdk_environment_lines
+        assert all("{env:EVERYTHING_SDK_DLL}" in line for line in sdk_environment_lines)
+        assert all("%USERPROFILE%" not in line for line in sdk_environment_lines)
+
+
+def test_sdk_guide_selects_dll_from_python_pointer_width_without_overwrite() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    source = (repository_root / "docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md").read_text(encoding="utf-8")
+
+    assert "struct.calcsize('P') * 8" in source
+    assert '$dllName = "Everything64.dll"' in source
+    assert '$dllName = "Everything32.dll"' in source
+    assert 'Join-Path $sdkRoot "dll\\$dllName"' in source
+    assert 'Join-Path $destDir $dllName' in source
+    assert "Copy-Item -LiteralPath $source -Destination $dest" in source
+    assert "Refusing to overwrite existing SDK DLL" in source
 
 
 def test_lite_stdio_does_not_import_heavy_mcp_runtimes_on_load() -> None:
@@ -162,11 +223,114 @@ def test_lite_stdio_selects_newest_version_when_client_requests_unsupported_vers
     session = lite_stdio.LiteSession()
 
     response = lite_stdio.handle_message(
-        request("initialize", {"protocolVersion": "2099-01-01", "capabilities": {}}),
+        request("initialize", valid_initialize_params("2099-01-01")),
         session,
     )
 
     assert response["result"]["protocolVersion"] == "2025-11-25"
+
+
+@pytest.mark.parametrize(
+    ("params", "error_message"),
+    [
+        pytest.param(MISSING_PARAMS, "Invalid params: expected object.", id="missing-params"),
+        pytest.param(None, "Invalid params: expected object.", id="null-params"),
+        pytest.param([], "Invalid params: expected object.", id="non-object-params"),
+        pytest.param(
+            {"capabilities": {}, "clientInfo": {"name": "client", "version": "1"}},
+            "Invalid params: protocolVersion must be a string.",
+            id="missing-protocol-version",
+        ),
+        pytest.param(
+            {
+                "protocolVersion": 20251125,
+                "capabilities": {},
+                "clientInfo": {"name": "client", "version": "1"},
+            },
+            "Invalid params: protocolVersion must be a string.",
+            id="wrong-protocol-version-type",
+        ),
+        pytest.param(
+            {"protocolVersion": "2025-11-25", "clientInfo": {"name": "client", "version": "1"}},
+            "Invalid params: capabilities must be an object.",
+            id="missing-capabilities",
+        ),
+        pytest.param(
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": [],
+                "clientInfo": {"name": "client", "version": "1"},
+            },
+            "Invalid params: capabilities must be an object.",
+            id="wrong-capabilities-type",
+        ),
+        pytest.param(
+            {"protocolVersion": "2025-11-25", "capabilities": {}},
+            "Invalid params: clientInfo must be an object.",
+            id="missing-client-info",
+        ),
+        pytest.param(
+            {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": "client"},
+            "Invalid params: clientInfo must be an object.",
+            id="wrong-client-info-type",
+        ),
+        pytest.param(
+            {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"version": "1"}},
+            "Invalid params: clientInfo.name must be a string.",
+            id="missing-client-name",
+        ),
+        pytest.param(
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": 1, "version": "1"},
+            },
+            "Invalid params: clientInfo.name must be a string.",
+            id="wrong-client-name-type",
+        ),
+        pytest.param(
+            {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "client"}},
+            "Invalid params: clientInfo.version must be a string.",
+            id="missing-client-version",
+        ),
+        pytest.param(
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "client", "version": 1},
+            },
+            "Invalid params: clientInfo.version must be a string.",
+            id="wrong-client-version-type",
+        ),
+    ],
+)
+def test_lite_stdio_rejects_invalid_initialize_params_without_advancing_session(
+    params: object,
+    error_message: str,
+) -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = lite_stdio.LiteSession()
+    initialize_request = request("initialize", id_="invalid-initialize")
+    if params is not MISSING_PARAMS:
+        initialize_request["params"] = params
+
+    response = lite_stdio.handle_message(initialize_request, session)
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": "invalid-initialize",
+        "error": {"code": -32602, "message": error_message},
+    }
+    assert session.state is lite_stdio.SessionState.NEW
+
+    retry = lite_stdio.handle_message(
+        request("initialize", valid_initialize_params(), id_="valid-retry"),
+        session,
+    )
+
+    assert retry["id"] == "valid-retry"
+    assert retry["result"]["protocolVersion"] == "2025-11-25"
+    assert session.state is lite_stdio.SessionState.INITIALIZING
 
 
 def test_lite_stdio_rejects_messages_without_exact_jsonrpc_version() -> None:
@@ -205,7 +369,7 @@ def test_lite_stdio_accepts_string_number_and_null_request_ids(request_id: str |
 def test_lite_stdio_rejects_invalid_initialize_ids_without_advancing_session(invalid_id: object) -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
     session = lite_stdio.LiteSession()
-    params = {"protocolVersion": "2025-11-25", "capabilities": {}}
+    params = valid_initialize_params()
 
     response = lite_stdio.handle_message(
         {"jsonrpc": "2.0", "id": invalid_id, "method": "initialize", "params": params},
@@ -240,7 +404,7 @@ def test_lite_stdio_requires_initialize_then_initialized_notification() -> None:
 
     before_initialize = lite_stdio.handle_message(request("tools/list", id_=2), session)
     initialize_response = lite_stdio.handle_message(
-        request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}}, id_=3),
+        request("initialize", valid_initialize_params(), id_=3),
         session,
     )
     before_notification = lite_stdio.handle_message(request("tools/list", id_=4), session)
@@ -333,7 +497,7 @@ def test_lite_stdio_hides_unexpected_tool_exception_details(
 ) -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
     session = initialized_session(lite_stdio)
-    sensitive_path = r"C:\Users\example\private\.env"
+    sensitive_path = r"X:\fixtures\private\.env"
     sensitive_token = "sensitive-value-do-not-disclose"
 
     def failing_call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:

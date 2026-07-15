@@ -11,7 +11,7 @@ The MCP is SDK-first. `es.exe` is only a fallback when SDK/IPC is unavailable.
 - Do not delete, move, rename, dedupe, quarantine, or clean user files.
 - Do not mutate Everything indexes or configuration.
 - Do not enable Everything HTTP.
-- Do not overwrite an existing SDK DLL without making a backup and getting explicit confirmation.
+- Do not overwrite an existing SDK DLL. Stop and report the existing path.
 - Treat `EVERYTHING_EXE`, `EVERYTHING_SDK_DLL`, and `EVERYTHING_ES_EXE` as trusted local paths. Never point them to untrusted downloads.
 
 ## Official Sources
@@ -36,11 +36,11 @@ The MCP is SDK-first. `es.exe` is only a fallback when SDK/IPC is unavailable.
 
 Official C docs recommend copying the DLL beside the consuming program executable. For OpenCode MCP usage, prefer a user-writable support directory and configure the MCP environment explicitly:
 
-```text
-%USERPROFILE%\.config\opencode\mcp-bin\everything-sdk\Everything64.dll
+```powershell
+$destDir = Join-Path $env:USERPROFILE ".config\opencode\mcp-bin\everything-sdk"
 ```
 
-Then set in global OpenCode config:
+Set the official OpenCode environment substitution in global config:
 
 ```json
 {
@@ -51,17 +51,23 @@ Then set in global OpenCode config:
       "enabled": true,
       "timeout": 20000,
       "environment": {
-        "EVERYTHING_SDK_DLL": "%USERPROFILE%\\.config\\opencode\\mcp-bin\\everything-sdk\\Everything64.dll"
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
       }
     }
   }
 }
 ```
 
+`{env:EVERYTHING_SDK_DLL}` is a literal OpenCode placeholder. Before launching
+OpenCode, set that host variable to the trusted DLL path. Use forward slashes in
+the value because OpenCode substitutes it directly into raw JSON. The agent
+procedure below derives the selected 32/64-bit DLL and normalizes its path.
+
 Alternative admin install:
 
 ```text
 C:\Program Files\Everything\Everything64.dll
+C:\Program Files\Everything\Everything32.dll
 ```
 
 The MCP auto-detects that location because it looks beside `Everything.exe`. This usually requires elevated permission.
@@ -83,8 +89,8 @@ fallback:
 
 ```json
 {
-  "EVERYTHING_EXE": "C:\\Program Files\\Everything\\Everything.exe",
-  "EVERYTHING_SDK_DLL": "%USERPROFILE%\\.config\\opencode\\mcp-bin\\everything-sdk\\Everything64.dll"
+  "EVERYTHING_EXE": "C:/Program Files/Everything/Everything.exe",
+  "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
 }
 ```
 
@@ -106,24 +112,36 @@ fallback:
    Expand-Archive -Path (Join-Path $sdkRoot "Everything-SDK.zip") -DestinationPath $sdkRoot -Force
    ```
 
-3. Choose the DLL matching Python bitness:
+3. In the same PowerShell session used for the copy, derive the DLL name from
+   the actual Python pointer width:
 
    ```powershell
-   py -c "import platform; print(platform.architecture()[0])"
+   $pointerBits = py -c "import struct; print(struct.calcsize('P') * 8)"
+   if ($LASTEXITCODE -ne 0) {
+       throw "Unable to determine Python pointer width."
+   }
+   switch ($pointerBits.Trim()) {
+       "64" { $dllName = "Everything64.dll" }
+       "32" { $dllName = "Everything32.dll" }
+       default { throw "Unsupported Python pointer width: $pointerBits" }
+   }
+   Write-Host "Selected SDK DLL: $dllName"
    ```
 
 4. Copy the DLL to the OpenCode MCP support directory:
 
    ```powershell
+   $source = Join-Path $sdkRoot "dll\$dllName"
    $destDir = "$env:USERPROFILE\.config\opencode\mcp-bin\everything-sdk"
-   $dest = Join-Path $destDir "Everything64.dll"
-   New-Item -ItemType Directory -Path $destDir -Force | Out-Null
-   if (Test-Path $dest) {
-       Write-Host "Existing SDK DLL found: $dest"
-       Write-Host "Stop here unless the user explicitly confirms replacement."
-       return
+   $dest = Join-Path $destDir $dllName
+   if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+       throw "Selected SDK DLL does not exist: $source"
    }
-   Copy-Item "$sdkRoot\dll\Everything64.dll" $dest
+   New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+   if (Test-Path -LiteralPath $dest) {
+       throw "Refusing to overwrite existing SDK DLL: $dest"
+   }
+   Copy-Item -LiteralPath $source -Destination $dest
    ```
 
 5. Backup global OpenCode config before editing:
@@ -132,11 +150,19 @@ fallback:
    Copy-Item "$env:USERPROFILE\.config\opencode\opencode.json" "$env:USERPROFILE\.config\opencode\opencode.backup-before-everything-sdk.json"
    ```
 
-6. Add or update the `everything-mew` MCP environment. Set
-   `EVERYTHING_SDK_DLL`; set `EVERYTHING_EXE` if Everything is not in its
-   default location; set `EVERYTHING_ES_EXE` only for the optional CLI fallback.
+6. Add or update the `everything-mew` MCP environment with the literal
+   `"EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"` substitution. Set
+   `EVERYTHING_EXE` if Everything is not in its default location; set
+   `EVERYTHING_ES_EXE` only for the optional CLI fallback.
 
-7. Restart OpenCode or start a new OpenCode session so global MCP config is reloaded.
+7. Set the selected DLL in the parent PowerShell with forward slashes, then
+   launch OpenCode from that shell so the variable is available for
+   substitution:
+
+   ```powershell
+   $env:EVERYTHING_SDK_DLL = $dest.Replace("\", "/")
+   opencode
+   ```
 
 8. Validate with read-only tool calls:
 

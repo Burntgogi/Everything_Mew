@@ -90,7 +90,9 @@ It does not install [`skills/everything/SKILL.md`](skills/everything/SKILL.md)
 into an agent host. Install that skill explicitly from this repository or from
 a plugin that packages it. The optional `[server]` extra installs FastMCP for
 the standard entrypoints; the lite entrypoints work with the runtime-only
-wheel.
+wheel. The source distribution additionally contains the test suite and the
+public SDK install guide; internal design, audit, and planning notes are not
+release artifacts.
 
 Example OpenCode-style registration:
 
@@ -102,11 +104,24 @@ Example OpenCode-style registration:
       "command": ["everything-mew"],
       "enabled": true,
       "environment": {
-        "EVERYTHING_SDK_DLL": "%USERPROFILE%\\.config\\opencode\\mcp-bin\\everything-sdk\\Everything64.dll"
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
       }
     }
   }
 }
+```
+
+OpenCode substitutes host environment variables only through
+`{env:VARIABLE_NAME}`. Set `EVERYTHING_SDK_DLL` in the parent PowerShell before
+launching OpenCode. Its value must use forward slashes because OpenCode inserts
+the value into raw JSON. Select `Everything64.dll` for 64-bit Python or
+`Everything32.dll` for 32-bit Python:
+
+```powershell
+$dllName = "Everything64.dll" # Use Everything32.dll with 32-bit Python.
+$dllPath = Join-Path $env:USERPROFILE ".config\opencode\mcp-bin\everything-sdk\$dllName"
+$env:EVERYTHING_SDK_DLL = $dllPath.Replace("\", "/")
+opencode
 ```
 
 The legacy command name `everything-mcp` is also kept for compatibility.

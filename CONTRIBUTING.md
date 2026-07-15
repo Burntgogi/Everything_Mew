@@ -15,15 +15,16 @@ Run from the repository root in PowerShell:
 ```powershell
 py -3.11 -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install --upgrade pip
-& .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+& .\.venv\Scripts\python.exe -m pip install -e ".[dev,server]"
 ```
 
-Install `.[server]` as well only when manually exercising the optional FastMCP
-entrypoints. The direct lite stdio entrypoints do not require FastAPI or
-FastMCP.
+CI installs the optional FastMCP dependency so the retained standard entrypoints
+are registration-tested. The direct lite stdio entrypoints themselves do not
+require FastAPI or FastMCP.
 
-선택 사항인 FastMCP 진입점을 직접 확인할 때만 `.[server]`도 설치하세요.
-직접 stdio를 처리하는 lite 진입점에는 FastAPI와 FastMCP가 필요하지 않습니다.
+CI는 선택 사항인 FastMCP 의존성도 설치해 기존 표준 진입점의 도구 등록을
+검증합니다. 직접 stdio를 처리하는 lite 진입점 자체에는 FastAPI와 FastMCP가
+필요하지 않습니다.
 
 ## Required checks / 필수 검사
 
@@ -34,6 +35,25 @@ Run the same checks used by CI:
 & .\.venv\Scripts\python.exe -m ruff check .
 & .\.venv\Scripts\python.exe -m mypy --strict src tests
 & .\.venv\Scripts\python.exe -m build
+```
+
+Construct the real FastMCP server and inspect its registrations without calling
+`run()` or starting stdio:
+
+```powershell
+@'
+import asyncio
+from everything_mcp.server import create_mcp
+
+server = create_mcp()
+tools = asyncio.run(server.list_tools())
+assert {tool.name for tool in tools} == {
+    "everything_status",
+    "everything_count",
+    "everything_search",
+    "everything_syntax_help",
+}
+'@ | & .\.venv\Scripts\python.exe -
 ```
 
 CI repeats these commands on Windows with Python 3.11 and 3.14. Both a wheel
@@ -133,20 +153,34 @@ for label, members in (("wheel", wheel_members), ("sdist", sdist_members)):
     print(f"{label}: {len(members)} files")
     print("\n".join(members))
     lowered = [member.lower().replace("\\", "/") for member in members]
-    forbidden = ("skills/", ".env", "_nonrelease", ".superpowers", ".dll")
+    forbidden = (
+        "skills/",
+        ".github/",
+        ".env",
+        "_nonrelease",
+        ".superpowers",
+        ".dll",
+        ".exe",
+        "sdk_design_review.md",
+    )
     assert not any(marker in member for member in lowered for marker in forbidden)
 '@ | & .\.venv\Scripts\python.exe -
 ```
 
 Also inspect archive text for credentials, tokens, personal paths, and local
 validation evidence. The wheel and sdist must not contain `skills/`, SDK DLLs,
-`.env` files, `_nonrelease/`, or `.superpowers/`. The agent skill is installed
-explicitly from this repository or from a plugin, never from the Python wheel.
+`.env` files, `_nonrelease/`, `.superpowers/`, CI internals, or stale design and
+planning documents. The sdist includes the tests and the public SDK install
+guide so pytest and mypy can be reproduced from source. The agent skill is
+installed explicitly from this repository or from a plugin, never from the
+Python wheel.
 
 아카이브 텍스트에 자격 증명, 토큰, 개인 경로, 로컬 검증 증거가 없는지도
 확인하세요. wheel과 sdist에는 `skills/`, SDK DLL, `.env`, `_nonrelease/`,
-`.superpowers/`가 포함되면 안 됩니다. 에이전트 스킬은 Python wheel이 아니라
-이 저장소 또는 플러그인에서 명시적으로 설치합니다.
+`.superpowers/`, CI 내부 파일, 오래된 설계/계획 문서가 포함되면 안 됩니다.
+sdist에는 소스에서 pytest와 mypy를 재현할 수 있도록 테스트와 공개 SDK 설치
+가이드를 포함합니다. 에이전트 스킬은 Python wheel이 아니라 이 저장소 또는
+플러그인에서 명시적으로 설치합니다.
 
 ## Release reproduction / 릴리스 재현
 

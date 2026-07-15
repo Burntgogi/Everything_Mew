@@ -75,11 +75,15 @@ def handle_message(message: dict[str, Any], session: LiteSession | None = None) 
     if method == "initialize":
         if active_session.state is not SessionState.NEW:
             return _error(request_id, -32600, "Initialize request already received.")
-        params = _params_object(message)
-        if params is None:
+        raw_params = message.get("params")
+        if not isinstance(raw_params, dict):
             return _error(request_id, -32602, "Invalid params: expected object.")
+        initialize_params = cast(dict[str, Any], raw_params)
+        validation_error = _initialize_params_error(initialize_params)
+        if validation_error is not None:
+            return _error(request_id, -32602, validation_error)
         active_session.state = SessionState.INITIALIZING
-        return _result(request_id, _initialize_result(params))
+        return _result(request_id, _initialize_result(initialize_params))
 
     if active_session.state is SessionState.NEW:
         return _error(request_id, -32002, "Server not initialized.")
@@ -135,6 +139,22 @@ def _initialize_result(params: dict[str, Any]) -> dict[str, Any]:
         "serverInfo": {"name": SERVER_NAME, "version": __version__},
         "instructions": SERVER_INSTRUCTIONS,
     }
+
+
+def _initialize_params_error(params: dict[str, Any]) -> str | None:
+    if not isinstance(params.get("protocolVersion"), str):
+        return "Invalid params: protocolVersion must be a string."
+    if not isinstance(params.get("capabilities"), dict):
+        return "Invalid params: capabilities must be an object."
+
+    client_info = params.get("clientInfo")
+    if not isinstance(client_info, dict):
+        return "Invalid params: clientInfo must be an object."
+    if not isinstance(client_info.get("name"), str):
+        return "Invalid params: clientInfo.name must be a string."
+    if not isinstance(client_info.get("version"), str):
+        return "Invalid params: clientInfo.version must be a string."
+    return None
 
 
 def _params_object(message: dict[str, Any]) -> dict[str, Any] | None:

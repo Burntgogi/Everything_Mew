@@ -90,7 +90,9 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 [`skills/everything/SKILL.md`](skills/everything/SKILL.md)를 에이전트 호스트에
 설치하지 않습니다. 이 스킬은 저장소 또는 스킬을 패키징한 플러그인에서
 명시적으로 설치하세요. 선택 사항인 `[server]` extra는 표준 진입점용
-FastMCP를 설치하며, lite 진입점은 런타임 전용 wheel만으로 동작합니다.
+FastMCP를 설치하며, lite 진입점은 런타임 전용 wheel만으로 동작합니다. 소스
+배포 파일에는 테스트 모음과 공개 SDK 설치 가이드도 포함하지만 내부 설계,
+감사, 계획 문서는 릴리스 산출물에 포함하지 않습니다.
 
 OpenCode 스타일 등록 예시:
 
@@ -102,11 +104,24 @@ OpenCode 스타일 등록 예시:
       "command": ["everything-mew"],
       "enabled": true,
       "environment": {
-        "EVERYTHING_SDK_DLL": "%USERPROFILE%\\.config\\opencode\\mcp-bin\\everything-sdk\\Everything64.dll"
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
       }
     }
   }
 }
+```
+
+OpenCode는 호스트 환경 변수를 `{env:VARIABLE_NAME}` 형식으로만 치환합니다.
+OpenCode를 시작하기 전에 부모 PowerShell에서 `EVERYTHING_SDK_DLL`을
+설정하세요. OpenCode가 값을 원시 JSON에 삽입하므로 환경 변수 값에는 순방향
+슬래시를 사용해야 합니다. 64비트 Python에는 `Everything64.dll`, 32비트
+Python에는 `Everything32.dll`을 선택하세요.
+
+```powershell
+$dllName = "Everything64.dll" # 32비트 Python에서는 Everything32.dll을 사용합니다.
+$dllPath = Join-Path $env:USERPROFILE ".config\opencode\mcp-bin\everything-sdk\$dllName"
+$env:EVERYTHING_SDK_DLL = $dllPath.Replace("\", "/")
+opencode
 ```
 
 호환성을 위해 기존 명령 이름 `everything-mcp`도 유지합니다.
