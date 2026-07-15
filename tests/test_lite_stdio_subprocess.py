@@ -11,6 +11,8 @@ import subprocess
 import sys
 from typing import Any
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MEASUREMENT_SCRIPT = ROOT / "scripts" / "measure_lite_sessions.ps1"
@@ -69,6 +71,13 @@ foreach ($functionName in @($env:TASK7_FUNCTIONS -split ',')) {
         timeout=timeout,
         check=False,
     )
+
+
+def measurement_function_source(name: str) -> str:
+    source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    match = re.search(rf"(?ms)^function {re.escape(name)}\s*\{{.*?^\}}", source)
+    assert match is not None, f"PowerShell function {name} was not found"
+    return match.group(0)
 
 
 def lite_environment() -> dict[str, str]:
@@ -169,22 +178,56 @@ def communicate_with_lite(process: subprocess.Popen[str], payload: str) -> tuple
 def terminate_process_tree(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
+    failures: list[Exception] = []
     if os.name == "nt":
-        subprocess.run(
-            ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        try:
+            taskkill = subprocess.run(
+                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if taskkill.returncode != 0:
+                detail = taskkill.stderr.strip() or taskkill.stdout.strip() or "no diagnostic output"
+                failures.append(RuntimeError(f"exact-root taskkill failed with {taskkill.returncode}: {detail}"))
+        except Exception as error:
+            failures.append(error)
     else:
-        process.kill()
-    process.wait(timeout=5)
+        try:
+            process.kill()
+        except Exception as error:
+            failures.append(error)
+    try:
+        process.wait(timeout=5)
+    except Exception as error:
+        failures.append(error)
+        try:
+            process.kill()
+            process.wait(timeout=5)
+        except Exception as fallback_error:
+            failures.append(fallback_error)
+    if failures:
+        raise ExceptionGroup(f"Failed to clean exact process tree rooted at PID {process.pid}", failures)
+
+
+def cleanup_lite_processes(processes: list[subprocess.Popen[str]]) -> list[Exception]:
+    failures: list[Exception] = []
+    for process in processes:
+        try:
+            if process.poll() is None:
+                terminate_process_tree(process)
+        except Exception as error:
+            failures.append(error)
+    return failures
 
 
 def run_lite_sessions(payloads: list[str]) -> list[subprocess.CompletedProcess[str]]:
-    processes = [start_lite() for _ in payloads]
+    processes: list[subprocess.Popen[str]] = []
+    primary_error: BaseException | None = None
     try:
+        for _ in payloads:
+            processes.append(start_lite())
         assert all(process.poll() is None for process in processes)
         with ThreadPoolExecutor(max_workers=len(processes)) as executor:
             futures = [
@@ -205,10 +248,82 @@ def run_lite_sessions(payloads: list[str]) -> list[subprocess.CompletedProcess[s
                 )
             )
         return completed
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
-        for process in processes:
-            if process.poll() is None:
-                terminate_process_tree(process)
+        cleanup_failures = cleanup_lite_processes(processes)
+        if cleanup_failures:
+            detail = "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_failures)
+            if primary_error is not None:
+                primary_error.add_note(f"Process cleanup failures after primary error: {detail}")
+            else:
+                raise ExceptionGroup("Process cleanup failures", cleanup_failures)
+
+
+def test_run_lite_sessions_cleans_processes_started_before_later_launch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def poll(self) -> None:
+            return None
+
+    first = FakeProcess()
+    launches = 0
+    cleaned: list[FakeProcess] = []
+
+    def fake_start_lite() -> Any:
+        nonlocal launches
+        launches += 1
+        if launches == 1:
+            return first
+        raise RuntimeError("launch N failed")
+
+    monkeypatch.setattr(sys.modules[__name__], "start_lite", fake_start_lite)
+    monkeypatch.setattr(sys.modules[__name__], "terminate_process_tree", cleaned.append)
+
+    with pytest.raises(RuntimeError, match="launch N failed"):
+        run_lite_sessions(["first", "second"])
+
+    assert cleaned == [first]
+
+
+def test_run_lite_sessions_continues_cleanup_failures_and_preserves_primary_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def poll(self) -> None:
+            return None
+
+    first = FakeProcess("first")
+    second = FakeProcess("second")
+    launch_results: list[Any] = [first, second, RuntimeError("primary launch failure")]
+    attempted: list[str] = []
+
+    def fake_start_lite() -> Any:
+        result = launch_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def fake_terminate(process: FakeProcess) -> None:
+        attempted.append(process.name)
+        if process is first:
+            raise TimeoutError("first cleanup timed out")
+
+    monkeypatch.setattr(sys.modules[__name__], "start_lite", fake_start_lite)
+    monkeypatch.setattr(sys.modules[__name__], "terminate_process_tree", fake_terminate)
+
+    with pytest.raises(RuntimeError, match="primary launch failure") as caught:
+        run_lite_sessions(["first", "second", "third"])
+
+    assert attempted == ["first", "second"]
+    assert caught.value.__notes__ == [
+        "Process cleanup failures after primary error: TimeoutError: first cleanup timed out"
+    ]
 
 
 def assert_successful_tool_response(response: dict[str, Any]) -> dict[str, Any]:
@@ -589,6 +704,8 @@ def test_measurement_script_owns_and_cleans_only_exact_process_trees() -> None:
     assert "stop-process -name" not in lowered
     assert "def terminate_process_tree" in test_source
     assert '"taskkill.exe", "/PID", str(process.pid), "/T", "/F"' in test_source
+    assert "timeout=10" in test_source
+    assert "process.wait(timeout=5)" in test_source
 
 
 def test_measurement_script_does_not_bind_the_read_only_pid_automatic_variable() -> None:
@@ -602,7 +719,7 @@ def test_measurement_script_does_not_bind_the_read_only_pid_automatic_variable()
     assert re.search(r"(?i)\[int\]\$pid\b", register_function.group("body")) is None
 
 
-def test_measurement_script_accepts_an_initially_empty_owned_process_registry() -> None:
+def test_measurement_script_requires_exact_handle_backed_owned_process_identity() -> None:
     body = r"""
 $registry = New-Object System.Collections.ArrayList
 $session = [pscustomobject]@{
@@ -611,20 +728,28 @@ $session = [pscustomobject]@{
     OwnedProcesses = New-Object System.Collections.ArrayList
 }
 $process = [System.Diagnostics.Process]::GetCurrentProcess()
-$record = Register-OwnedProcess -Session $session -Process $process -CimProcess $null `
-    -ProcessId $process.Id -Role 'launcher' -OwnedRegistry $registry
-$record.startTimeUtc = ([DateTime]::Parse($record.startTimeUtc).AddMilliseconds(-0.5)).ToString('o')
-$sameRecord = Register-OwnedProcess -Session $session -Process $process -CimProcess $null `
-    -ProcessId $process.Id -Role 'runtime' -OwnedRegistry $registry
+$record = Register-OwnedProcess -Session $session -Process $process -Role 'launcher' -OwnedRegistry $registry
+$state = Get-OwnedProcessState -Record $record
+$recordedTicks = $record.startTimeUtcTicks
+$sameRecord = Register-OwnedProcess -Session $session -Process $process -Role 'runtime' -OwnedRegistry $registry
+$record.startTimeUtcTicks = $recordedTicks + 1
+$mismatchedState = Get-OwnedProcessState -Record $record
 [pscustomobject]@{
     registryCount = $registry.Count
     sessionCount = $session.OwnedProcesses.Count
     pid = $sameRecord.pid
     roles = @($sameRecord.roles)
+    owned = $sameRecord.owned
+    actionable = $sameRecord.actionable
+    startTimeUtc = $sameRecord.startTimeUtc
+    recordedTicks = $recordedTicks
+    exactState = $state.status
+    mismatchedState = $mismatchedState.status
+    sameHandle = [object]::ReferenceEquals($sameRecord.process, $process)
 } | ConvertTo-Json -Compress
 """
     completed = run_measurement_function_probe(
-        ["Get-ProcessStartTimeUtc", "Register-OwnedProcess"],
+        ["Get-ExactProcessIdentity", "Register-OwnedProcess", "Get-OwnedProcessState"],
         body,
     )
 
@@ -634,6 +759,164 @@ $sameRecord = Register-OwnedProcess -Session $session -Process $process -CimProc
     assert result["sessionCount"] == 1
     assert result["pid"] > 0
     assert set(result["roles"]) == {"launcher", "runtime"}
+    assert result["owned"] is True
+    assert result["actionable"] is True
+    assert result["startTimeUtc"]
+    assert result["recordedTicks"] > 0
+    assert result["exactState"] == "alive-owned"
+    assert result["mismatchedState"] == "pid-reused"
+    assert result["sameHandle"] is True
+
+
+def test_measurement_script_never_fuzzily_matches_or_reopens_pids_for_cleanup() -> None:
+    register_source = measurement_function_source("Register-OwnedProcess")
+    sync_source = measurement_function_source("Sync-OwnedDescendants")
+    state_source = measurement_function_source("Get-OwnedProcessState")
+    cleanup_source = measurement_function_source("Stop-ExactOwnedProcessTree")
+    tree_kill_source = measurement_function_source("Invoke-ExactTreeKill")
+
+    assert "CimProcess" not in register_source
+    assert "startTimeUtcTicks" in register_source
+    assert "TotalMilliseconds" not in register_source
+    assert "TotalMilliseconds" not in state_source
+    assert "Get-CimInstance" not in state_source
+    assert sync_source.count("GetProcessById") == 1
+    assert sync_source.index("GetProcessById") < sync_source.index("Register-OwnedProcess")
+    assert sync_source.index(".Handle") < sync_source.index("Register-OwnedProcess")
+    assert "GetProcessById" not in cleanup_source
+    assert "$record.process.Kill()" in cleanup_source
+    assert "RootProcess" in tree_kill_source
+    assert "ExpectedStartTimeUtcTicks" in tree_kill_source
+    assert "HasExited" in tree_kill_source
+
+
+def test_measurement_script_rejects_invalid_memory_evidence_before_arithmetic() -> None:
+    body = r"""
+function New-Checkpoint {
+    param([long[]]$WorkingSets, [long[]]$PrivateBytes)
+    $perProcess = @()
+    for ($index = 0; $index -lt $WorkingSets.Count; $index++) {
+        $perProcess += [pscustomobject]@{
+            session = $index + 1
+            workingSetBytes = $WorkingSets[$index]
+            privateBytes = $PrivateBytes[$index]
+        }
+    }
+    return [pscustomobject]@{
+        perProcess = @($perProcess)
+        aggregate = [pscustomobject]@{
+            workingSetBytes = [long](($WorkingSets | Measure-Object -Sum).Sum)
+            privateBytes = [long](($PrivateBytes | Measure-Object -Sum).Sum)
+        }
+    }
+}
+function New-BackendRun {
+    return [pscustomobject]@{
+        backend = 'memory-test'
+        memory = [pscustomobject]@{
+            afterFirstSearch = New-Checkpoint -WorkingSets @(101, 102) -PrivateBytes @(51, 52)
+            postIdle = New-Checkpoint -WorkingSets @(99, 100) -PrivateBytes @(49, 50)
+        }
+    }
+}
+
+$valid = Assert-ValidMemoryEvidence -BackendRun (New-BackendRun) -ExpectedSessions 2
+$rejected = New-Object System.Collections.ArrayList
+$unexpected = New-Object System.Collections.ArrayList
+$cases = @(
+    [pscustomobject]@{ name = 'nullAggregate'; mutate = { param($run) $run.memory.afterFirstSearch.aggregate.privateBytes = $null } },
+    [pscustomobject]@{ name = 'nullPerProcess'; mutate = { param($run) $run.memory.postIdle.perProcess[0].privateBytes = $null } },
+    [pscustomobject]@{ name = 'wrongCardinality'; mutate = { param($run) $run.memory.afterFirstSearch.perProcess = @($run.memory.afterFirstSearch.perProcess[0]) } },
+    [pscustomobject]@{ name = 'badSum'; mutate = { param($run) $run.memory.postIdle.aggregate.workingSetBytes += 1 } },
+    [pscustomobject]@{ name = 'zero'; mutate = { param($run) $run.memory.afterFirstSearch.perProcess[0].workingSetBytes = 0 } },
+    [pscustomobject]@{ name = 'negative'; mutate = { param($run) $run.memory.afterFirstSearch.perProcess[0].privateBytes = -1 } },
+    [pscustomobject]@{ name = 'nan'; mutate = { param($run) $run.memory.postIdle.perProcess[0].privateBytes = [double]::NaN } },
+    [pscustomobject]@{ name = 'string'; mutate = { param($run) $run.memory.postIdle.aggregate.privateBytes = 'garbage' } },
+    [pscustomobject]@{ name = 'missing'; mutate = { param($run) $run.memory.afterFirstSearch.aggregate.PSObject.Properties.Remove('privateBytes') } },
+    [pscustomobject]@{ name = 'duplicateSession'; mutate = { param($run) $run.memory.postIdle.perProcess[1].session = 1 } }
+)
+foreach ($case in $cases) {
+    $run = New-BackendRun
+    & $case.mutate $run
+    try {
+        $null = Assert-ValidMemoryEvidence -BackendRun $run -ExpectedSessions 2
+        $null = $unexpected.Add($case.name)
+    }
+    catch {
+        $null = $rejected.Add($case.name)
+    }
+}
+[pscustomobject]@{
+    validPass = $valid.pass
+    validCheckpoints = @($valid.checkpoints).Count
+    rejected = @($rejected)
+    unexpected = @($unexpected)
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(
+        [
+            "Test-ObjectProperty",
+            "ConvertTo-RequiredPositiveInt64",
+            "Assert-ValidMemoryCheckpoint",
+            "Assert-ValidMemoryEvidence",
+        ],
+        body,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["validPass"] is True
+    assert result["validCheckpoints"] == 2
+    assert set(result["rejected"]) == {
+        "nullAggregate",
+        "nullPerProcess",
+        "wrongCardinality",
+        "badSum",
+        "zero",
+        "negative",
+        "nan",
+        "string",
+        "missing",
+        "duplicateSession",
+    }
+    assert result["unexpected"] == []
+
+
+def test_pid_recheck_json_uses_consistent_true_empty_arrays() -> None:
+    body = r"""
+$entries = @(
+    [pscustomobject]@{
+        pid = 42
+        recordedStartTimeUtcTicks = 123
+        currentStartTimeUtcTicks = $null
+        status = 'not-present'
+    }
+)
+New-PidRecheckResult -Entries $entries | ConvertTo-Json -Depth 10 -Compress
+"""
+    completed = run_measurement_function_probe(["New-PidRecheckResult"], body)
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["checkedPids"] == [42]
+    assert result["checkedCount"] == len(result["checkedPids"]) == 1
+    for field, count_field in (
+        ("aliveOwnedPids", "aliveOwnedCount"),
+        ("reusedPids", "reusedCount"),
+        ("unreadablePids", "unreadableCount"),
+    ):
+        assert isinstance(result[field], list)
+        assert result[field] == []
+        assert result[count_field] == len(result[field]) == 0
+    assert result["entries"] == [
+        {
+            "pid": 42,
+            "recordedStartTimeUtcTicks": 123,
+            "currentStartTimeUtcTicks": None,
+            "status": "not-present",
+        }
+    ]
+    assert result["pass"] is True
 
 
 def test_measurement_evidence_contract_fails_closed_on_exit_codes_and_pid_audit() -> None:
@@ -645,6 +928,9 @@ def test_measurement_evidence_contract_fails_closed_on_exit_codes_and_pid_audit(
         "responseDeadlineMode",
         "exitCodesComplete",
         "processAudit",
+        "memoryValidation",
+        "independentPidRecheck",
+        "pidRecheckPath",
         "overallComponents",
     ):
         assert field in source
@@ -660,31 +946,80 @@ $nonzeroRuntimeFails = -not (Test-SessionExitCodesComplete -SessionEvidence $ses
 $validAudit = [pscustomobject]@{
     pass = $true
     checkedPids = @(101, 102)
+    checkedCount = 2
     alivePids = @()
+    aliveCount = 0
+    reusedPids = @()
+    reusedCount = 0
+    unreadablePids = @()
+    unreadableCount = 0
+    ownedCount = 2
+    observationCount = 0
+    ownedIdentitiesComplete = $true
     entries = @(
-        [pscustomobject]@{ pid = 101; status = 'exited' },
-        [pscustomobject]@{ pid = 102; status = 'exited' }
+        [pscustomobject]@{ pid = 101; owned = $true; actionable = $true; startTimeUtc = '2026-01-01T00:00:00Z'; startTimeUtcTicks = [long]1; status = 'exited' },
+        [pscustomobject]@{ pid = 102; owned = $true; actionable = $true; startTimeUtc = '2026-01-01T00:00:01Z'; startTimeUtcTicks = [long]2; status = 'exited' }
     )
 }
 $validPidAudit = Test-ProcessAuditComplete -Audit $validAudit
 $validAudit.alivePids = @(102)
 $alivePidFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
 $validAudit.alivePids = @()
+$validAudit.entries[0].startTimeUtcTicks = $null
+$missingIdentityFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
+$validAudit.entries[0].startTimeUtcTicks = [long]1
+$validAudit.reusedPids = @(101)
+$validAudit.reusedCount = 1
+$reusedPidFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
+$validAudit.reusedPids = @()
+$validAudit.reusedCount = 0
+$validAudit.checkedCount = 1
+$badAuditCountFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
+$validAudit.checkedCount = 2
 $validAudit.checkedPids = $null
 $missingAuditFails = -not (Test-ProcessAuditComplete -Audit $validAudit)
+
+$validRecheck = [pscustomobject]@{
+    pass = $true
+    checkedPids = @(101, 102)
+    checkedCount = 2
+    aliveOwnedPids = @()
+    aliveOwnedCount = 0
+    reusedPids = @()
+    reusedCount = 0
+    unreadablePids = @()
+    unreadableCount = 0
+    entries = @(
+        [pscustomobject]@{ pid = 101; recordedStartTimeUtcTicks = [long]1; status = 'not-present' },
+        [pscustomobject]@{ pid = 102; recordedStartTimeUtcTicks = [long]2; status = 'not-present' }
+    )
+}
+$validPidRecheck = Test-IndependentPidRecheckComplete -Recheck $validRecheck
+$validRecheck.unreadablePids = @(102)
+$validRecheck.unreadableCount = 1
+$unreadableRecheckFails = -not (Test-IndependentPidRecheckComplete -Recheck $validRecheck)
+$validRecheck.unreadablePids = @()
+$validRecheck.unreadableCount = 0
+$validRecheck.entries[0].recordedStartTimeUtcTicks = $null
+$missingRecheckIdentityFails = -not (Test-IndependentPidRecheckComplete -Recheck $validRecheck)
 
 $components = [pscustomobject]@{
     liteProtocolAccountingCleanup = $true
     fastMcpProtocolAccountingCleanup = $true
     postRunPidAudit = $true
+    independentPidRecheck = $true
     exitCodeCompleteness = $true
+    memoryEvidenceValidation = $true
     memoryStability = $true
     liteFastMcpIdleRatio = $true
     evidenceIntegrity = $true
 }
 $validOverall = Test-AllExplicitPassComponents -Components $components
-$components.postRunPidAudit = $null
+$components.memoryEvidenceValidation = $null
 $missingOverallFails = -not (Test-AllExplicitPassComponents -Components $components)
+$components.memoryEvidenceValidation = $true
+$components.independentPidRecheck = $null
+$missingRecheckFails = -not (Test-AllExplicitPassComponents -Components $components)
 
 [pscustomobject]@{
     validExitCodes = $validExitCodes
@@ -692,9 +1027,16 @@ $missingOverallFails = -not (Test-AllExplicitPassComponents -Components $compone
     nonzeroRuntimeFails = $nonzeroRuntimeFails
     validPidAudit = $validPidAudit
     alivePidFails = $alivePidFails
+    missingIdentityFails = $missingIdentityFails
+    reusedPidFails = $reusedPidFails
+    badAuditCountFails = $badAuditCountFails
     missingAuditFails = $missingAuditFails
+    validPidRecheck = $validPidRecheck
+    unreadableRecheckFails = $unreadableRecheckFails
+    missingRecheckIdentityFails = $missingRecheckIdentityFails
     validOverall = $validOverall
     missingOverallFails = $missingOverallFails
+    missingRecheckFails = $missingRecheckFails
 } | ConvertTo-Json -Compress
 """
     completed = run_measurement_function_probe(
@@ -702,6 +1044,7 @@ $missingOverallFails = -not (Test-AllExplicitPassComponents -Components $compone
             "Test-ObjectProperty",
             "Test-SessionExitCodesComplete",
             "Test-ProcessAuditComplete",
+            "Test-IndependentPidRecheckComplete",
             "Test-AllExplicitPassComponents",
         ],
         body,
