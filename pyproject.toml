@@ -7,7 +7,7 @@ name = "everything-mew"
 version = "0.1.0"
 description = "Everything_Mew: a read-only FastMCP server that helps AI agents search with Everything"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 license = { file = "LICENSE" }
 dependencies = []
 classifiers = [
@@ -15,12 +15,15 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 [project.optional-dependencies]
 server = ["fastmcp>=2"]
 test = ["pytest>=8"]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+dev = ["build>=1.2", "pytest>=8", "ruff>=0.6", "mypy>=1.11"]
 
 [project.scripts]
 everything-mew = "everything_mcp.__main__:main"
@@ -30,6 +33,20 @@ everything-mcp-lite = "everything_mcp.lite_stdio:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/everything_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/LICENSE",
+    "/README.md",
+    "/README.ko.md",
+    "/SECURITY.md",
+    "/docs",
+    "/opencode.example.json",
+    "/pyproject.toml",
+    "/src",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

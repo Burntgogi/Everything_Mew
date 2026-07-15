@@ -3,8 +3,10 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+import tomllib
 from collections.abc import MutableMapping
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from typing import Any
 from typing import cast
 
@@ -47,6 +49,53 @@ def initialized_session(lite_stdio: Any, protocol_version: str = "2025-11-25") -
     return session
 
 
+def test_package_version_prefers_installed_distribution_metadata(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    version_module = importlib.import_module("everything_mcp.version")
+
+    def installed_version(distribution_name: str) -> str:
+        assert distribution_name == "everything-mew"
+        return "9.8.7"
+
+    def unexpected_source_fallback(pyproject_path: Path) -> str:
+        pytest.fail(f"source fallback should not be read: {pyproject_path}")
+
+    monkeypatch.setattr(version_module.metadata, "version", installed_version)
+    monkeypatch.setattr(version_module, "_source_tree_version", unexpected_source_fallback)
+
+    assert version_module._resolve_version(tmp_path / "missing-pyproject.toml") == "9.8.7"
+
+
+def test_package_version_falls_back_to_structurally_parsed_pyproject(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    version_module = importlib.import_module("everything_mcp.version")
+    pyproject_path = tmp_path / "pyproject.toml"
+    pyproject_path.write_text(
+        '[tool.decoy]\nversion = "0.0.0"\n\n[project]\nname = "everything-mew"\nversion = "1.2.3"\n',
+        encoding="utf-8",
+    )
+
+    def missing_distribution(distribution_name: str) -> str:
+        raise version_module.metadata.PackageNotFoundError(distribution_name)
+
+    monkeypatch.setattr(version_module.metadata, "version", missing_distribution)
+
+    assert version_module._resolve_version(pyproject_path) == "1.2.3"
+
+
+def test_package_version_literal_exists_only_in_pyproject() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    pyproject = tomllib.loads((repository_root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = cast(dict[str, object], pyproject["project"])
+    package_version = project["version"]
+    assert isinstance(package_version, str)
+
+    for relative_path in ("src/everything_mcp/version.py", "src/everything_mcp/lite_stdio.py"):
+        source = (repository_root / relative_path).read_text(encoding="utf-8")
+        assert package_version not in source
+
+
 def test_lite_stdio_does_not_import_heavy_mcp_runtimes_on_load() -> None:
     sys.modules.pop("everything_mcp", None)
     sys.modules.pop("everything_mcp.server", None)
@@ -75,6 +124,7 @@ def test_lite_stdio_tool_specs_are_shared_and_immutable() -> None:
 
 def test_lite_stdio_supports_current_and_previous_protocol_versions() -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    version_module = importlib.import_module("everything_mcp.version")
 
     assert lite_stdio.SUPPORTED_PROTOCOL_VERSIONS == ("2025-11-25", "2025-06-18")
     for protocol_version in lite_stdio.SUPPORTED_PROTOCOL_VERSIONS:
@@ -97,7 +147,7 @@ def test_lite_stdio_supports_current_and_previous_protocol_versions() -> None:
             "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "Everything_Mew_Lite", "version": "0.1.0"},
+                "serverInfo": {"name": "Everything_Mew_Lite", "version": version_module.__version__},
                 "instructions": (
                     "Everything_Mew is a read-only Windows file and folder discovery server backed by Everything. "
                     "Use everything_count before broad searches, add path/extension/date/size filters for large "
@@ -283,8 +333,8 @@ def test_lite_stdio_hides_unexpected_tool_exception_details(
 ) -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
     session = initialized_session(lite_stdio)
-    sensitive_path = r"C:\Users\JMTFAM01\secrets\.env"
-    sensitive_token = "api-token-do-not-disclose"
+    sensitive_path = r"C:\Users\example\private\.env"
+    sensitive_token = "sensitive-value-do-not-disclose"
 
     def failing_call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"failed at {sensitive_path}: {sensitive_token}")

@@ -19,9 +19,9 @@ from typing import Any, cast
 from .contracts import SortName
 from .tool_specs import TOOL_SPEC_BY_NAME, tool_definitions
 from .validation import ToolValidationError, validate_tool_arguments
+from .version import __version__
 
 SERVER_NAME = "Everything_Mew_Lite"
-SERVER_VERSION = "0.1.0"
 JSONRPC_VERSION = "2.0"
 TOOL_EXECUTION_ERROR = "Tool execution failed."
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
@@ -132,7 +132,7 @@ def _initialize_result(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "protocolVersion": protocol_version,
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+        "serverInfo": {"name": SERVER_NAME, "version": __version__},
         "instructions": SERVER_INSTRUCTIONS,
     }
 

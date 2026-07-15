@@ -3,7 +3,7 @@
 언어: [English](README.md) | 한국어
 
 <div align="center" aria-label="Everything_Mew 고양이 마스코트">
-  <img src="docs/assets/everything-mew-banner.png" width="420" alt="Everything_Mew: 인공지능의 검색을 돕는 작은 고양이">
+  <img src="https://raw.githubusercontent.com/Burntgogi/Everything_Mew/main/docs/assets/everything-mew-banner.png" width="420" alt="Everything_Mew: 인공지능의 검색을 돕는 작은 고양이">
 </div>
 
 **Everything_Mew**는 [Everything](https://www.voidtools.com/)을 이용해 AI 에이전트의 검색을 빠르게 돕는 Windows 전용 읽기 전용 MCP 서버와 OpenCode 스킬입니다.
@@ -31,7 +31,7 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 
 ## 업데이트 노트
 
-### 다음 릴리스: 낮은 대기 메모리 MCP 모드
+### 0.2.0 예정(미배포): 낮은 대기 메모리 MCP 모드
 
 이번 업데이트는 Codex Desktop처럼 활성 세션마다 서버 프로세스를 유지하는 MCP
 호스트를 위해 낮은 대기 메모리용 stdio MCP 경로를 추가합니다.
@@ -42,7 +42,13 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 - Everything SDK/IPC 백엔드는 실제 도구가 호출될 때까지 로드를 지연합니다.
 - 기존 `everything-mew`와 `everything-mcp` 진입점은 FastMCP 경로로 계속 사용할 수 있습니다.
 - 패키지 최상위 import는 FastMCP 서버 모듈을 lazy-loading하도록 바뀌었습니다.
+- 서버 버전은 설치된 패키지 메타데이터에서 읽고, 소스 체크아웃에서는 `pyproject.toml`을 구조적으로 파싱해 대체 값을 사용합니다.
+- Windows CI에서 Python 3.11과 3.14, strict 타입 검사, 두 배포 형식, 설치 wheel의 lite 핸드셰이크를 검증합니다.
 - lite stdio 동작, 읽기 전용 도구 메타데이터, 어댑터 선택, 광범위 쿼리 안전장치, 문법 검증에 대한 계약/안전 테스트를 보강했습니다.
+
+기능 브랜치의 패키지 버전은 `0.1.0`으로 유지하며, `0.2.0`은 아직 배포되지
+않은 예정 버전입니다. 한영 릴리스 노트는 [변경 기록](CHANGELOG.md)을
+참조하세요.
 
 권장 적용 방식:
 
@@ -58,7 +64,7 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
   - 64비트 Python -> `Everything64.dll`
 - 이 연동은 로컬 Everything IPC를 사용하므로 Everything HTTP 서버가 필요하지 않습니다.
 - Everything Lite는 IPC를 허용하지 않으므로 지원하지 않습니다.
-- Python 3.11 이상.
+- CPython 3.11부터 3.14까지.
 - 로컬 stdio MCP를 지원하는 OpenCode 또는 다른 MCP 호스트.
 
 공식 출처:
@@ -79,6 +85,12 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
    ```
 
 5. MCP 호스트에 로컬 stdio MCP 서버를 등록합니다.
+
+빌드된 Python wheel에는 MCP 런타임과 콘솔 진입점만 포함됩니다.
+[`skills/everything/SKILL.md`](skills/everything/SKILL.md)를 에이전트 호스트에
+설치하지 않습니다. 이 스킬은 저장소 또는 스킬을 패키징한 플러그인에서
+명시적으로 설치하세요. 선택 사항인 `[server]` extra는 표준 진입점용
+FastMCP를 설치하며, lite 진입점은 런타임 전용 wheel만으로 동작합니다.
 
 OpenCode 스타일 등록 예시:
 
@@ -106,10 +118,11 @@ Codex Desktop처럼 활성 세션마다 stdio MCP 프로세스를 유지하는 �
 everything-mew-lite
 ```
 
-`everything-mew-lite`는 작은 MCP 도구 표면을 직접 처리하며, 대기 중에는
-FastMCP를 로드하지 않습니다. Everything 백엔드는 실제 도구 호출 시점에만
-불러옵니다. editable 설치 후 콘솔 스크립트가 아직 재생성되지 않았다면 같은
-환경 변수와 함께 `python -m everything_mcp.lite_stdio`를 사용할 수 있습니다.
+`everything-mew-lite`는 stdio에서 작은 MCP 도구 표면을 직접 처리합니다.
+FastAPI를 시작하거나 요구하지 않으며 FastMCP도 필요하지 않습니다. Everything
+백엔드는 실제 도구 호출 시점에만 불러옵니다. editable 설치 후 콘솔 스크립트가
+아직 재생성되지 않았다면 같은 환경 변수와 함께
+`python -m everything_mcp.lite_stdio`를 사용할 수 있습니다.
 
 낮은 대기 메모리 모드의 변경 사항:
 
@@ -127,6 +140,9 @@ FastMCP를 로드하지 않습니다. Everything 백엔드는 실제 도구 호�
 - [`opencode.example.json`](opencode.example.json): MCP 등록 예시.
 - [`docs/AGENT_INSTALLATION_GUIDE.md`](docs/AGENT_INSTALLATION_GUIDE.md): 에이전트용 안전 설치 가이드.
 - [`docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md`](docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md): SDK 중심 설치 안내.
+- [`CHANGELOG.md`](CHANGELOG.md): 한영 예정/배포 변경 기록.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): 기여 및 릴리스 재현 명령.
+- [`SECURITY.md`](SECURITY.md): 비공개 취약점 신고 정책.
 - [`LICENSE`](LICENSE): Apache License 2.0.
 
 계획 문서, 워크플로 초안, 로컬 검증 증거, 장비별 메모는 배포 파일에서 제외하고 `_nonrelease/` 아래에 보관해야 합니다.
@@ -214,9 +230,15 @@ everything-mew-lite
 ```powershell
 py -m pytest -q
 py -m ruff check .
-py -m mypy src tests
-py -m pip wheel . --no-deps -w .\dist-check
+py -m mypy --strict src tests
+py -m build
 ```
+
+새 venv를 사용하는 설치 wheel 스모크 및 산출물 검사 명령은
+[CONTRIBUTING.md](CONTRIBUTING.md)에 있습니다. `PYTHONPATH`를 제거하고 설치된
+`everything-mew-lite` 진입점을 실행해 `initialize`,
+`notifications/initialized`, `tools/list`, 설치 메타데이터 버전, 네 가지 도구를
+검증합니다.
 
 예상 도구 목록:
 
@@ -231,5 +253,5 @@ everything_syntax_help
 
 - SDK DLL, `.env`, 로컬 MCP 설정, 캐시, 빌드 산출물, 장비별 검증 로그는 커밋하지 마세요.
 - 예시와 문서에 개인 경로를 넣지 마세요.
-- `EVERYTHING_SDK_DLL`과 `EVERYTHING_ES_EXE`는 신뢰할 수 있는 로컬 Everything 바이너리만 가리켜야 합니다.
+- `EVERYTHING_EXE`, `EVERYTHING_SDK_DLL`, `EVERYTHING_ES_EXE`는 신뢰할 수 있는 로컬 Everything 바이너리만 가리켜야 합니다.
 - 이 프로젝트는 Apache License 2.0으로 배포됩니다.

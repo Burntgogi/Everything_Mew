@@ -3,7 +3,7 @@
 Language: English | [한국어](README.ko.md)
 
 <div align="center" aria-label="Everything_Mew cat mascot">
-  <img src="docs/assets/everything-mew-banner.png" width="420" alt="Everything_Mew: a small cat that helps AI search">
+  <img src="https://raw.githubusercontent.com/Burntgogi/Everything_Mew/main/docs/assets/everything-mew-banner.png" width="420" alt="Everything_Mew: a small cat that helps AI search">
 </div>
 
 **Everything_Mew** is a Windows-only, read-only MCP server and OpenCode skill that helps AI agents search faster with [Everything](https://www.voidtools.com/).
@@ -31,7 +31,7 @@ Everything_Mew is for candidate discovery, not code understanding, duplicate cle
 
 ## Update notes
 
-### Next release: low-standby MCP mode
+### Planned 0.2.0 (Unreleased): low-standby MCP mode
 
 This update adds a low-standby stdio MCP path for Codex Desktop and other MCP
 hosts that keep one server process alive per active session.
@@ -42,7 +42,12 @@ hosts that keep one server process alive per active session.
 - Everything SDK/IPC backend loading is deferred until a tool is actually called.
 - Existing `everything-mew` and `everything-mcp` entrypoints remain available for the FastMCP path.
 - The package top-level import now lazy-loads the FastMCP server module.
+- The server version comes from installed package metadata, with a structural `pyproject.toml` fallback in source checkouts.
+- Windows CI verifies Python 3.11 and 3.14, strict typing, both distribution formats, and the installed-wheel lite handshake.
 - Contract and safety tests were expanded around lite stdio behavior, read-only tool metadata, adapter selection, broad-query safety, and syntax validation.
+
+The feature branch package version remains `0.1.0`; `0.2.0` is a planned,
+unreleased target. See the bilingual [changelog](CHANGELOG.md).
 
 Recommended adoption:
 
@@ -58,7 +63,7 @@ Recommended adoption:
   - 64-bit Python -> `Everything64.dll`
 - The integration uses local Everything IPC; the Everything HTTP server is not required.
 - Everything Lite is not supported because it does not allow IPC.
-- Python 3.11+.
+- CPython 3.11 through 3.14.
 - OpenCode or another MCP host with local stdio MCP support.
 
 Official sources:
@@ -79,6 +84,13 @@ Official sources:
    ```
 
 5. Register the local stdio MCP server in your MCP host.
+
+The built Python wheel contains the MCP runtime and console entrypoints only.
+It does not install [`skills/everything/SKILL.md`](skills/everything/SKILL.md)
+into an agent host. Install that skill explicitly from this repository or from
+a plugin that packages it. The optional `[server]` extra installs FastMCP for
+the standard entrypoints; the lite entrypoints work with the runtime-only
+wheel.
 
 Example OpenCode-style registration:
 
@@ -106,10 +118,11 @@ active session, prefer the low-standby entrypoint:
 everything-mew-lite
 ```
 
-`everything-mew-lite` implements the small MCP tool surface directly and avoids
-loading FastMCP while idle. It imports the Everything backend only when a tool is
-called. If the console script has not been regenerated after an editable install,
-use `python -m everything_mcp.lite_stdio` with the same environment variables.
+`everything-mew-lite` implements the small MCP tool surface directly over
+stdio. It does not start or require FastAPI, and it does not require FastMCP.
+It imports the Everything backend only when a tool is called. If the console
+script has not been regenerated after an editable install, use
+`python -m everything_mcp.lite_stdio` with the same environment variables.
 
 Low-standby mode changes:
 
@@ -127,6 +140,9 @@ Low-standby mode changes:
 - [`opencode.example.json`](opencode.example.json): example MCP registration.
 - [`docs/AGENT_INSTALLATION_GUIDE.md`](docs/AGENT_INSTALLATION_GUIDE.md): safe agent-facing install guide.
 - [`docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md`](docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md): SDK-focused install notes.
+- [`CHANGELOG.md`](CHANGELOG.md): bilingual planned and released changes.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): contributor and release reproduction commands.
+- [`SECURITY.md`](SECURITY.md): private vulnerability reporting policy.
 - [`LICENSE`](LICENSE): Apache License 2.0.
 
 Planning notes, workflow drafts, local validation evidence, and machine-specific notes are intentionally excluded from release files and should stay under `_nonrelease/`.
@@ -214,9 +230,15 @@ Recommended release checks:
 ```powershell
 py -m pytest -q
 py -m ruff check .
-py -m mypy src tests
-py -m pip wheel . --no-deps -w .\dist-check
+py -m mypy --strict src tests
+py -m build
 ```
+
+The complete fresh-venv installed-wheel smoke and artifact inspection commands
+are in [CONTRIBUTING.md](CONTRIBUTING.md). They clear `PYTHONPATH`, invoke the
+installed `everything-mew-lite` entrypoint, and verify `initialize`,
+`notifications/initialized`, `tools/list`, installed metadata version, and all
+four tools.
 
 Expected tool set:
 
@@ -231,5 +253,5 @@ everything_syntax_help
 
 - Do not commit SDK DLLs, `.env` files, local MCP config, caches, build outputs, or machine-specific validation logs.
 - Keep personal paths out of examples and documentation.
-- `EVERYTHING_SDK_DLL` and `EVERYTHING_ES_EXE` must point only to trusted local Everything binaries.
+- `EVERYTHING_EXE`, `EVERYTHING_SDK_DLL`, and `EVERYTHING_ES_EXE` must point only to trusted local Everything binaries.
 - This project is licensed under Apache License 2.0.

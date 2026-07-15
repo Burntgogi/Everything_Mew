@@ -12,7 +12,7 @@ The MCP is SDK-first. `es.exe` is only a fallback when SDK/IPC is unavailable.
 - Do not mutate Everything indexes or configuration.
 - Do not enable Everything HTTP.
 - Do not overwrite an existing SDK DLL without making a backup and getting explicit confirmation.
-- Treat `EVERYTHING_SDK_DLL` as a trusted local path. Never point it to an untrusted download.
+- Treat `EVERYTHING_EXE`, `EVERYTHING_SDK_DLL`, and `EVERYTHING_ES_EXE` as trusted local paths. Never point them to untrusted downloads.
 
 ## Official Sources
 
@@ -27,6 +27,7 @@ The MCP is SDK-first. `es.exe` is only a fallback when SDK/IPC is unavailable.
 - Windows.
 - Everything installed.
 - Everything client running in the background.
+- CPython 3.11 through 3.14.
 - Python process bitness must match the SDK DLL:
   - 64-bit Python -> `Everything64.dll`
   - 32-bit Python -> `Everything32.dll`
@@ -64,6 +65,28 @@ C:\Program Files\Everything\Everything64.dll
 ```
 
 The MCP auto-detects that location because it looks beside `Everything.exe`. This usually requires elevated permission.
+
+## Environment Variables
+
+- `EVERYTHING_EXE`: optional path to the trusted Everything client executable.
+  The default is `C:\Program Files\Everything\Everything.exe`. Set this when
+  Everything is installed elsewhere; the path also anchors SDK DLL discovery.
+- `EVERYTHING_SDK_DLL`: optional explicit path to the trusted official SDK DLL.
+  Use `Everything64.dll` for 64-bit Python and `Everything32.dll` for 32-bit
+  Python. The primary SDK/IPC backend uses this value first.
+- `EVERYTHING_ES_EXE`: optional path to a trusted `es.exe` command-line client.
+  Configure it only when the ES CLI fallback is intentionally installed. It
+  does not replace the SDK DLL for the primary backend.
+
+An SDK-first OpenCode environment can set the first two values and omit the ES
+fallback:
+
+```json
+{
+  "EVERYTHING_EXE": "C:\\Program Files\\Everything\\Everything.exe",
+  "EVERYTHING_SDK_DLL": "%USERPROFILE%\\.config\\opencode\\mcp-bin\\everything-sdk\\Everything64.dll"
+}
+```
 
 ## Agent Procedure
 
@@ -109,7 +132,9 @@ The MCP auto-detects that location because it looks beside `Everything.exe`. Thi
    Copy-Item "$env:USERPROFILE\.config\opencode\opencode.json" "$env:USERPROFILE\.config\opencode\opencode.backup-before-everything-sdk.json"
    ```
 
-6. Add or update the `everything-mew` MCP environment with `EVERYTHING_SDK_DLL`.
+6. Add or update the `everything-mew` MCP environment. Set
+   `EVERYTHING_SDK_DLL`; set `EVERYTHING_EXE` if Everything is not in its
+   default location; set `EVERYTHING_ES_EXE` only for the optional CLI fallback.
 
 7. Restart OpenCode or start a new OpenCode session so global MCP config is reloaded.
 
@@ -119,8 +144,8 @@ The MCP auto-detects that location because it looks beside `Everything.exe`. Thi
    from everything_mcp.server import everything_status, everything_count, everything_search
 
    print(everything_status())
-    print(everything_count("ext:md", scope=r"C:\Path\to\project"))
-    print(everything_search("ext:md", scope=r"C:\Path\to\project", limit=5, metadata=True))
+   print(everything_count("ext:md", scope=r"C:\Path\to\project"))
+   print(everything_search("ext:md", scope=r"C:\Path\to\project", limit=5, metadata=True))
    ```
 
 Expected healthy status:
@@ -139,6 +164,8 @@ Expected healthy status:
 ## Troubleshooting
 
 - `Everything SDK DLL was not found`: `EVERYTHING_SDK_DLL` is missing or points to the wrong path.
+- `everythingInstalled` is false: verify `EVERYTHING_EXE` or the default Everything install path.
+- ES fallback is unavailable: verify `EVERYTHING_ES_EXE` only if the optional `es.exe` fallback is intended.
 - `ctypes WinDLL is unavailable`: not running on Windows.
 - Runtime/version check failed: Everything client may not be running.
 - Empty results while Everything is starting: wait for the Everything database to load.
@@ -146,4 +173,4 @@ Expected healthy status:
 
 ## Release Note
 
-Do not commit downloaded SDK DLLs, local OpenCode config files, or machine-specific validation logs. Keep those under local support directories and point `EVERYTHING_SDK_DLL` at the trusted local DLL path.
+Do not commit downloaded SDK DLLs, local OpenCode config files, or machine-specific validation logs. Keep those under local support directories and point `EVERYTHING_EXE`, `EVERYTHING_SDK_DLL`, and `EVERYTHING_ES_EXE` only at trusted local binaries.
