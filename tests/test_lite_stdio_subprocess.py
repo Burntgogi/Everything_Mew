@@ -848,6 +848,7 @@ $overrunStopwatch.Stop()
 def test_probe_lifetime_is_locally_owned_and_disposed_inside_outer_cleanup() -> None:
     source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
     probe_source = measurement_function_source("Invoke-PythonProbe")
+    provenance_source = measurement_function_source("Get-ExecutedPackageProvenance")
     close_source = measurement_function_source("Close-ProbeResources")
 
     assert "try {" in probe_source and "finally {" in probe_source
@@ -862,8 +863,10 @@ def test_probe_lifetime_is_locally_owned_and_disposed_inside_outer_cleanup() -> 
     assert "output = $stdout" in probe_source
     assert ".Dispose()" in close_source
     assert "$null = Invoke-ExactTreeKill" not in probe_source
+    assert "Invoke-PythonProbe" in provenance_source
     assert re.search(
-        r"(?ms)\$startedAtUtc\s*=.*?\ntry\s*\{\s*\n\s*\$probe\s*=\s*Invoke-PythonProbe",
+        r"(?ms)\$startedAtUtc\s*=.*?\$provenanceBefore\s*=\s*"
+        r"Get-ExecutedPackageProvenance.*?Assert-PreMeasurementSourceIntegrity.*?\ntry\s*\{",
         source,
     )
 
@@ -892,7 +895,7 @@ def test_probe_topology_requires_repeated_post_exit_reconciliation_and_rooted_ro
     assert "probeLifecycle.topology.stablePassesRequired" in summary_source
     assert "probeLifecycle.topology.postExitDiscoveryPasses" in summary_source
     assert "parentStartTimeUtcTicks" in summary_source
-    assert "schemaVersion = 6" in source
+    assert "schemaVersion = 7" in source
 
     body = r"""
 $entries = @(
@@ -2175,6 +2178,224 @@ $missingProbeLifecycleFails = -not (Test-AllExplicitPassComponents -Components $
 
     assert completed.returncode == 0, completed.stderr
     assert all(json.loads(completed.stdout).values())
+
+
+def test_repository_runtime_snapshot_rejects_dirty_tracked_source() -> None:
+    body = r"""
+$root = Join-Path ([IO.Path]::GetTempPath()) ("task7-integrity-" + [Guid]::NewGuid().ToString("N"))
+try {
+    $package = Join-Path $root "src\everything_mcp"
+    $scripts = Join-Path $root "scripts"
+    $null = New-Item -ItemType Directory -Path $package, $scripts -Force
+    $runtimePath = Join-Path $package "runtime.py"
+    $scriptPath = Join-Path $scripts "measure_lite_sessions.ps1"
+    [IO.File]::WriteAllText($runtimePath, "VALUE = 1`n")
+    [IO.File]::WriteAllText($scriptPath, "Write-Output 'ok'`n")
+    & git -C $root init -q
+    & git -C $root config user.email "task7@example.invalid"
+    & git -C $root config user.name "Task 7"
+    & git -C $root add -- src/everything_mcp/runtime.py scripts/measure_lite_sessions.ps1
+    & git -C $root commit -q -m initial
+    if ($LASTEXITCODE -ne 0) { throw "temporary repository commit failed" }
+
+    $clean = Get-RepositoryRuntimeSnapshot -WorkingDirectory $root -ScriptPath $scriptPath
+    [IO.File]::WriteAllText($runtimePath, "VALUE = 2`n")
+    $dirty = Get-RepositoryRuntimeSnapshot -WorkingDirectory $root -ScriptPath $scriptPath
+    [pscustomobject]@{
+        cleanPass = $clean.pass
+        cleanTracked = $clean.trackedWorktreeClean
+        runtimeFileCount = $clean.runtimeFileCount
+        runtimeDigestPresent = -not [string]::IsNullOrWhiteSpace($clean.runtimeTreeDigestSha256)
+        cleanFilesMatchHead = @($clean.runtimeFiles | Where-Object { $_.matchesHead -ne $true }).Count -eq 0
+        dirtyPass = $dirty.pass
+        dirtyTracked = $dirty.trackedWorktreeClean
+        dirtyPaths = @($dirty.dirtyTrackedPaths)
+        dirtyRuntimeMatchesHead = @($dirty.runtimeFiles | Where-Object { $_.matchesHead -ne $true }).Count -eq 0
+    } | ConvertTo-Json -Depth 10 -Compress
+}
+finally {
+    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+}
+"""
+    completed = run_measurement_function_probe(
+        ["Get-GitValue", "Get-FileSha256Hex", "Get-RepositoryRuntimeSnapshot"],
+        body,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result == {
+        "cleanPass": True,
+        "cleanTracked": True,
+        "runtimeFileCount": 1,
+        "runtimeDigestPresent": True,
+        "cleanFilesMatchHead": True,
+        "dirtyPass": False,
+        "dirtyTracked": False,
+        "dirtyPaths": ["src/everything_mcp/runtime.py"],
+        "dirtyRuntimeMatchesHead": False,
+    }
+
+
+def test_package_provenance_rejects_wrong_checkout_wheel_foreign_and_null_fields(
+    tmp_path: Path,
+) -> None:
+    expected_root = tmp_path / "repo" / "src" / "everything_mcp"
+    expected_root.mkdir(parents=True)
+    package_file = expected_root / "__init__.py"
+    package_file.write_text("", encoding="utf-8")
+    python_path = tmp_path / "python.exe"
+    python_path.write_text("", encoding="utf-8")
+    foreign_root = tmp_path / "other-checkout" / "src" / "everything_mcp"
+    wheel_root = tmp_path / "venv" / "Lib" / "site-packages" / "everything_mcp"
+    body = r"""
+function New-Provenance($Root, $File, $Version, $Kind) {
+    return [pscustomobject]@{
+        packageFile = $File
+        packageRoot = $Root
+        packageVersion = $Version
+        packageFileSha256 = 'package-sha'
+        pythonVersion = '3.11.9'
+        pythonExecutable = $env:TASK7_PYTHON
+        fastMcpVersion = '3.4.4'
+        sourceKind = $Kind
+    }
+}
+$expected = $env:TASK7_EXPECTED_ROOT
+$valid = New-Provenance $expected (Join-Path $expected '__init__.py') '0.1.0' 'repository-source'
+$wrongCheckout = New-Provenance $env:TASK7_FOREIGN_ROOT (Join-Path $env:TASK7_FOREIGN_ROOT '__init__.py') '0.1.0' 'foreign-source'
+$wheel = New-Provenance $env:TASK7_WHEEL_ROOT (Join-Path $env:TASK7_WHEEL_ROOT '__init__.py') '0.1.0' 'installed-wheel'
+$foreign = New-Provenance $env:TASK7_FOREIGN_ROOT (Join-Path $env:TASK7_FOREIGN_ROOT '__init__.py') '9.9.9' 'foreign-package'
+$nullPath = New-Provenance $expected $null '0.1.0' 'repository-source'
+$nullVersion = New-Provenance $expected (Join-Path $expected '__init__.py') $null 'repository-source'
+[pscustomobject]@{
+    valid = Test-ExecutedPackageProvenance -Provenance $valid -ExpectedPackageRoot $expected -ExpectedPythonExecutable $env:TASK7_PYTHON
+    wrongCheckoutFails = -not (Test-ExecutedPackageProvenance -Provenance $wrongCheckout -ExpectedPackageRoot $expected -ExpectedPythonExecutable $env:TASK7_PYTHON)
+    wheelFails = -not (Test-ExecutedPackageProvenance -Provenance $wheel -ExpectedPackageRoot $expected -ExpectedPythonExecutable $env:TASK7_PYTHON)
+    foreignFails = -not (Test-ExecutedPackageProvenance -Provenance $foreign -ExpectedPackageRoot $expected -ExpectedPythonExecutable $env:TASK7_PYTHON)
+    nullPathFails = -not (Test-ExecutedPackageProvenance -Provenance $nullPath -ExpectedPackageRoot $expected -ExpectedPythonExecutable $env:TASK7_PYTHON)
+    nullVersionFails = -not (Test-ExecutedPackageProvenance -Provenance $nullVersion -ExpectedPackageRoot $expected -ExpectedPythonExecutable $env:TASK7_PYTHON)
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(
+        ["Test-ObjectProperty", "Test-ExecutedPackageProvenance"],
+        body,
+        extra_env={
+            "TASK7_EXPECTED_ROOT": str(expected_root),
+            "TASK7_PYTHON": str(python_path),
+            "TASK7_FOREIGN_ROOT": str(foreign_root),
+            "TASK7_WHEEL_ROOT": str(wheel_root),
+        },
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert all(json.loads(completed.stdout).values())
+
+
+def test_evidence_integrity_rejects_head_and_runtime_changes() -> None:
+    body = r"""
+function Copy-Object($Value) { return ($Value | ConvertTo-Json -Depth 20 | ConvertFrom-Json) }
+$snapshot = [pscustomobject]@{
+    pass = $true
+    capturedAtUtc = '2026-01-01T00:00:00Z'
+    gitHead = 'head-a'
+    gitTree = 'tree-a'
+    trackedWorktreeClean = $true
+    dirtyTrackedPaths = @()
+    runtimeRootRelativePath = 'src/everything_mcp'
+    runtimeFileCount = 2
+    runtimeTreeDigestSha256 = 'runtime-digest'
+    runtimeFilesMatchHead = $true
+    runtimeFiles = @()
+    scriptRelativePath = 'scripts/measure_lite_sessions.ps1'
+    scriptSha256 = 'script-sha'
+    headScriptBlob = 'script-blob'
+    workingScriptBlob = 'script-blob'
+    scriptMatchesHead = $true
+}
+$provenance = [pscustomobject]@{
+    pass = $true
+    packageFile = 'C:\repo\src\everything_mcp\__init__.py'
+    packageRoot = 'C:\repo\src\everything_mcp'
+    packageVersion = '0.1.0'
+    packageFileSha256 = 'package-sha'
+    pythonVersion = '3.11.9'
+    pythonExecutable = 'C:\repo\.venv\Scripts\python.exe'
+    fastMcpVersion = '3.4.4'
+    sourceKind = 'repository-source'
+    runtimeTreeDigestSha256 = 'runtime-digest'
+    probeLifecycle = [pscustomobject]@{ pass = $true }
+}
+$valid = New-EvidenceIntegrity -BeforeSnapshot $snapshot -AfterSnapshot (Copy-Object $snapshot) `
+    -BeforeProvenance $provenance -AfterProvenance (Copy-Object $provenance)
+$headAfter = Copy-Object $snapshot
+$headAfter.gitHead = 'head-b'
+$headAfter.gitTree = 'tree-b'
+$headChanged = New-EvidenceIntegrity -BeforeSnapshot $snapshot -AfterSnapshot $headAfter `
+    -BeforeProvenance $provenance -AfterProvenance (Copy-Object $provenance)
+$runtimeAfter = Copy-Object $snapshot
+$runtimeAfter.runtimeTreeDigestSha256 = 'changed-runtime'
+$runtimeAfter.runtimeFilesMatchHead = $false
+$runtimeAfter.pass = $false
+$runtimeChanged = New-EvidenceIntegrity -BeforeSnapshot $snapshot -AfterSnapshot $runtimeAfter `
+    -BeforeProvenance $provenance -AfterProvenance (Copy-Object $provenance)
+[pscustomobject]@{
+    valid = $valid.pass
+    beforeAndAfterRecorded = $null -ne $valid.before -and $null -ne $valid.after
+    headChangeFails = -not $headChanged.pass
+    headUnchangedFalse = -not $headChanged.unchanged.gitHead
+    treeUnchangedFalse = -not $headChanged.unchanged.gitTree
+    runtimeChangeFails = -not $runtimeChanged.pass
+    runtimeDigestUnchangedFalse = -not $runtimeChanged.unchanged.runtimeTreeDigest
+    runtimeFilesMatchFalse = -not $runtimeChanged.after.repository.runtimeFilesMatchHead
+} | ConvertTo-Json -Compress
+"""
+    completed = run_measurement_function_probe(["New-EvidenceIntegrity"], body)
+
+    assert completed.returncode == 0, completed.stderr
+    assert all(json.loads(completed.stdout).values())
+
+
+def test_measurement_binds_evidence_to_bounded_executed_repo_source() -> None:
+    source = MEASUREMENT_SCRIPT.read_text(encoding="utf-8")
+    provenance_source = measurement_function_source("Get-ExecutedPackageProvenance")
+    summary_source = measurement_function_source("New-MarkdownSummary")
+
+    assert "Invoke-PythonProbe" in provenance_source
+    assert "-WorkingDirectory $WorkingDirectory" in provenance_source
+    assert "TimeoutSeconds" in provenance_source
+    assert "everything_mcp.__file__" in provenance_source
+    assert "everything_mcp.version" in provenance_source
+    assert "packageVersion" in provenance_source
+    assert "packageFileSha256" in provenance_source
+    assert "sourceKind" in provenance_source
+    assert "runtimeTreeDigestSha256" in provenance_source
+    assert "Get-FileHash" not in source
+
+    before_snapshot = source.index("$repositoryBefore = Get-RepositoryRuntimeSnapshot")
+    before_provenance = source.index("$provenanceBefore = Get-ExecutedPackageProvenance")
+    before_assertion = source.index("Assert-PreMeasurementSourceIntegrity", before_provenance)
+    first_backend = source.index("$lite = Invoke-BackendMeasurement")
+    second_backend = source.index("$fastMcp = Invoke-BackendMeasurement")
+    after_snapshot = source.index("$repositoryAfter = Get-RepositoryRuntimeSnapshot")
+    after_provenance = source.index("$provenanceAfter = Get-ExecutedPackageProvenance")
+    final_integrity = source.index("$integrity = New-EvidenceIntegrity")
+    assert before_snapshot < before_provenance < before_assertion < first_backend
+    assert second_backend < after_snapshot < after_provenance < final_integrity
+
+    for field in (
+        "before.repository",
+        "before.package",
+        "after.repository",
+        "after.package",
+        "runtimeTreeDigestSha256",
+        "packageFile",
+        "packageRoot",
+        "packageVersion",
+        "trackedWorktreeClean",
+    ):
+        assert field in summary_source
 
 
 def test_owned_task7_files_contain_no_personal_machine_paths() -> None:

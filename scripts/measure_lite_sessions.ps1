@@ -1480,6 +1480,7 @@ function Invoke-PythonProbe {
         [string]$Code,
         [Parameter(Mandatory = $true)]
         [string]$FailureMessage,
+        [string]$WorkingDirectory = "",
         [ValidateRange(1, 300)]
         [int]$TimeoutSeconds = 30,
         [ValidateRange(1, 30)]
@@ -1513,6 +1514,9 @@ function Invoke-PythonProbe {
         $startInfo.RedirectStandardInput = $true
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
+        if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+            $startInfo.WorkingDirectory = [IO.Path]::GetFullPath($WorkingDirectory)
+        }
 
         $process = New-Object System.Diagnostics.Process
         $process.StartInfo = $startInfo
@@ -3760,7 +3764,74 @@ function Get-GitValue {
     return $value
 }
 
-function Get-EvidenceIntegrity {
+function Get-FileSha256Hex {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $stream = [IO.File]::OpenRead($Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Test-ExecutedPackageProvenance {
+    param(
+        [object]$Provenance,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPackageRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPythonExecutable
+    )
+
+    if ($null -eq $Provenance) {
+        return $false
+    }
+    $requiredStrings = @(
+        "packageFile",
+        "packageRoot",
+        "packageVersion",
+        "packageFileSha256",
+        "pythonVersion",
+        "pythonExecutable",
+        "fastMcpVersion",
+        "sourceKind"
+    )
+    foreach ($field in $requiredStrings) {
+        if (
+            -not (Test-ObjectProperty -InputObject $Provenance -Name $field) -or
+            $Provenance.$field -isnot [string] -or
+            [string]::IsNullOrWhiteSpace([string]$Provenance.$field)
+        ) {
+            return $false
+        }
+    }
+    try {
+        $expectedRoot = [IO.Path]::GetFullPath($ExpectedPackageRoot).TrimEnd('\', '/')
+        $actualRoot = [IO.Path]::GetFullPath([string]$Provenance.packageRoot).TrimEnd('\', '/')
+        $expectedPackageFile = [IO.Path]::GetFullPath((Join-Path $expectedRoot "__init__.py"))
+        $actualPackageFile = [IO.Path]::GetFullPath([string]$Provenance.packageFile)
+        $expectedPython = [IO.Path]::GetFullPath($ExpectedPythonExecutable)
+        $actualPython = [IO.Path]::GetFullPath([string]$Provenance.pythonExecutable)
+    }
+    catch {
+        return $false
+    }
+    return $Provenance.sourceKind -eq "repository-source" -and
+        $actualRoot -ieq $expectedRoot -and
+        $actualPackageFile -ieq $expectedPackageFile -and
+        $actualPython -ieq $expectedPython -and
+        (Test-Path -LiteralPath $actualPackageFile -PathType Leaf) -and
+        (Test-Path -LiteralPath $actualPython -PathType Leaf)
+}
+
+function Get-RepositoryRuntimeSnapshot {
     param(
         [Parameter(Mandatory = $true)]
         [string]$WorkingDirectory,
@@ -3768,27 +3839,298 @@ function Get-EvidenceIntegrity {
         [string]$ScriptPath
     )
 
-    $scriptSha256 = (Get-FileHash -LiteralPath $ScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $gitHead = Get-GitValue -WorkingDirectory $WorkingDirectory -Arguments @("rev-parse", "HEAD")
     $gitTree = Get-GitValue -WorkingDirectory $WorkingDirectory -Arguments @("rev-parse", "HEAD^{tree}")
+    $statusOutput = @(& git -C $WorkingDirectory status --porcelain=v1 --untracked-files=no 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "git status --porcelain=v1 --untracked-files=no failed: $($statusOutput -join ' ')"
+    }
+    $dirtyTrackedPaths = @(
+        $statusOutput | ForEach-Object {
+            $statusLine = [string]$_
+            if ($statusLine.Length -gt 3) { $statusLine.Substring(3).Trim() }
+        } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+
+    $trackedRuntimePaths = @(& git -C $WorkingDirectory ls-files -- "src/everything_mcp/*.py" 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "git ls-files for runtime Python files failed: $($trackedRuntimePaths -join ' ')"
+    }
+    $trackedRuntimePaths = @(
+        $trackedRuntimePaths |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
+
+    $runtimeFiles = @()
+    $digestRecords = New-Object System.Collections.Generic.List[string]
+    foreach ($relativePath in $trackedRuntimePaths) {
+        $absolutePath = Join-Path $WorkingDirectory ($relativePath -replace '/', [IO.Path]::DirectorySeparatorChar)
+        $exists = Test-Path -LiteralPath $absolutePath -PathType Leaf
+        $sha256 = $null
+        $workingBlob = $null
+        if ($exists) {
+            $sha256 = Get-FileSha256Hex -Path $absolutePath
+            $workingBlob = Get-GitValue -WorkingDirectory $WorkingDirectory `
+                -Arguments @("hash-object", "--", $absolutePath)
+        }
+        $headBlob = Get-GitValue -WorkingDirectory $WorkingDirectory `
+            -Arguments @("rev-parse", "HEAD:$relativePath")
+        $matchesHead = $exists -and -not [string]::IsNullOrWhiteSpace($workingBlob) -and
+            $workingBlob -eq $headBlob
+        $runtimeFiles += [pscustomobject]@{
+            relativePath = $relativePath
+            sha256 = $sha256
+            headBlob = $headBlob
+            workingBlob = $workingBlob
+            exists = $exists
+            matchesHead = $matchesHead
+        }
+        $null = $digestRecords.Add("$relativePath`0$sha256`0$headBlob`0$workingBlob")
+    }
+
+    $digestAlgorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digestBytes = [Text.Encoding]::UTF8.GetBytes(($digestRecords -join "`n"))
+        $runtimeTreeDigestSha256 = ([BitConverter]::ToString(
+                $digestAlgorithm.ComputeHash($digestBytes)
+            ) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $digestAlgorithm.Dispose()
+    }
+
+    $scriptSha256 = Get-FileSha256Hex -Path $ScriptPath
     $headScriptBlob = Get-GitValue -WorkingDirectory $WorkingDirectory `
         -Arguments @("rev-parse", "HEAD:scripts/measure_lite_sessions.ps1")
     $workingScriptBlob = Get-GitValue -WorkingDirectory $WorkingDirectory `
         -Arguments @("hash-object", "--", $ScriptPath)
-    $matchesHead = $headScriptBlob -eq $workingScriptBlob
+    $runtimeMatchesHead = $runtimeFiles.Count -gt 0 -and
+        @($runtimeFiles | Where-Object { $_.matchesHead -ne $true }).Count -eq 0
+    $trackedWorktreeClean = $dirtyTrackedPaths.Count -eq 0
+    $scriptMatchesHead = $headScriptBlob -eq $workingScriptBlob
     return [pscustomobject]@{
-        pass = -not [string]::IsNullOrWhiteSpace($scriptSha256) -and
+        pass = $trackedWorktreeClean -and $runtimeMatchesHead -and $scriptMatchesHead -and
             -not [string]::IsNullOrWhiteSpace($gitHead) -and
             -not [string]::IsNullOrWhiteSpace($gitTree) -and
-            $matchesHead
-        scriptRelativePath = "scripts/measure_lite_sessions.ps1"
-        scriptSha256 = $scriptSha256
+            -not [string]::IsNullOrWhiteSpace($runtimeTreeDigestSha256)
+        capturedAtUtc = [DateTime]::UtcNow.ToString("o")
         gitHead = $gitHead
         gitTree = $gitTree
+        trackedWorktreeClean = $trackedWorktreeClean
+        dirtyTrackedPaths = [string[]]@($dirtyTrackedPaths)
+        runtimeRootRelativePath = "src/everything_mcp"
+        runtimeFileCount = $runtimeFiles.Count
+        runtimeTreeDigestSha256 = $runtimeTreeDigestSha256
+        runtimeFilesMatchHead = $runtimeMatchesHead
+        runtimeFiles = [object[]]@($runtimeFiles)
+        scriptRelativePath = "scripts/measure_lite_sessions.ps1"
+        scriptSha256 = $scriptSha256
         headScriptBlob = $headScriptBlob
         workingScriptBlob = $workingScriptBlob
-        scriptMatchesHead = $matchesHead
+        scriptMatchesHead = $scriptMatchesHead
     }
+}
+
+function New-EvidenceIntegrity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$BeforeSnapshot,
+        [Parameter(Mandatory = $true)]
+        [object]$AfterSnapshot,
+        [Parameter(Mandatory = $true)]
+        [object]$BeforeProvenance,
+        [Parameter(Mandatory = $true)]
+        [object]$AfterProvenance
+    )
+
+    $unchanged = [pscustomobject]@{
+        gitHead = $BeforeSnapshot.gitHead -eq $AfterSnapshot.gitHead
+        gitTree = $BeforeSnapshot.gitTree -eq $AfterSnapshot.gitTree
+        trackedWorktreeClean = $BeforeSnapshot.trackedWorktreeClean -eq $true -and
+            $AfterSnapshot.trackedWorktreeClean -eq $true
+        runtimeTreeDigest = $BeforeSnapshot.runtimeTreeDigestSha256 -eq
+            $AfterSnapshot.runtimeTreeDigestSha256
+        runtimeFileCount = $BeforeSnapshot.runtimeFileCount -eq $AfterSnapshot.runtimeFileCount
+        runtimeFilesMatchHead = $BeforeSnapshot.runtimeFilesMatchHead -eq $true -and
+            $AfterSnapshot.runtimeFilesMatchHead -eq $true
+        scriptSha256 = $BeforeSnapshot.scriptSha256 -eq $AfterSnapshot.scriptSha256
+        scriptBlob = $BeforeSnapshot.workingScriptBlob -eq $AfterSnapshot.workingScriptBlob
+        packageFile = $BeforeProvenance.packageFile -ieq $AfterProvenance.packageFile
+        packageRoot = $BeforeProvenance.packageRoot -ieq $AfterProvenance.packageRoot
+        packageVersion = $BeforeProvenance.packageVersion -eq $AfterProvenance.packageVersion
+        packageFileSha256 = $BeforeProvenance.packageFileSha256 -eq
+            $AfterProvenance.packageFileSha256
+        pythonExecutable = $BeforeProvenance.pythonExecutable -ieq $AfterProvenance.pythonExecutable
+        importedRuntimeDigest = $BeforeProvenance.runtimeTreeDigestSha256 -eq
+            $AfterProvenance.runtimeTreeDigestSha256
+    }
+    $allUnchanged = @($unchanged.PSObject.Properties | Where-Object { $_.Value -ne $true }).Count -eq 0
+    $beforePass = $BeforeSnapshot.pass -eq $true -and $BeforeProvenance.pass -eq $true -and
+        $BeforeProvenance.runtimeTreeDigestSha256 -eq $BeforeSnapshot.runtimeTreeDigestSha256
+    $afterPass = $AfterSnapshot.pass -eq $true -and $AfterProvenance.pass -eq $true -and
+        $AfterProvenance.runtimeTreeDigestSha256 -eq $AfterSnapshot.runtimeTreeDigestSha256
+    return [pscustomobject]@{
+        pass = $beforePass -and $afterPass -and $allUnchanged
+        before = [pscustomobject]@{
+            pass = $beforePass
+            repository = $BeforeSnapshot
+            package = $BeforeProvenance
+        }
+        after = [pscustomobject]@{
+            pass = $afterPass
+            repository = $AfterSnapshot
+            package = $AfterProvenance
+        }
+        unchanged = $unchanged
+        scriptRelativePath = $BeforeSnapshot.scriptRelativePath
+        scriptSha256 = $BeforeSnapshot.scriptSha256
+        gitHead = $BeforeSnapshot.gitHead
+        gitTree = $BeforeSnapshot.gitTree
+        headScriptBlob = $BeforeSnapshot.headScriptBlob
+        workingScriptBlob = $BeforeSnapshot.workingScriptBlob
+        scriptMatchesHead = $BeforeSnapshot.scriptMatchesHead -eq $true -and
+            $AfterSnapshot.scriptMatchesHead -eq $true
+        runtimeTreeDigestSha256 = $BeforeSnapshot.runtimeTreeDigestSha256
+        runtimeFileCount = $BeforeSnapshot.runtimeFileCount
+        packageFile = $BeforeProvenance.packageFile
+        packageRoot = $BeforeProvenance.packageRoot
+        packageVersion = $BeforeProvenance.packageVersion
+        packageFileSha256 = $BeforeProvenance.packageFileSha256
+        sourceKind = $BeforeProvenance.sourceKind
+    }
+}
+
+function Get-ExecutedPackageProvenance {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)]
+        [string]$PythonExecutable,
+        [Parameter(Mandatory = $true)]
+        [object]$RuntimeSnapshot,
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSeconds = 30
+    )
+
+    $expectedPackageRoot = [IO.Path]::GetFullPath(
+        (Join-Path $WorkingDirectory "src\everything_mcp")
+    ).TrimEnd('\', '/')
+    $code = "import base64, fastmcp, json, os, platform, sys, everything_mcp; from everything_mcp.version import __version__ as package_version; package_file = os.path.realpath(everything_mcp.__file__) if everything_mcp.__file__ else None; payload = {'packageFile': package_file, 'packageRoot': os.path.dirname(package_file) if package_file else None, 'packageVersion': package_version, 'pythonVersion': platform.python_version(), 'pythonExecutable': os.path.realpath(sys.executable)}; print(base64.b64encode(json.dumps(payload, separators=(',', ':')).encode('utf-8')).decode('ascii') + '|' + str(getattr(fastmcp, '__version__', '')) + '|' + ('1' if os.path.normcase(sys.executable) != os.path.normcase(getattr(sys, '_base_executable', sys.executable)) else '0'), flush=True); sys.stdin.readline()"
+    $probe = Invoke-PythonProbe -Executable $PythonExecutable -Code $code `
+        -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds `
+        -FailureMessage "Selected Python must import FastMCP and this repository's everything_mcp source."
+    $parts = ([string]$probe.output) -split '\|', 3
+    if ($parts.Count -ne 3 -or [string]::IsNullOrWhiteSpace($parts[0])) {
+        throw "Package provenance probe returned a malformed envelope."
+    }
+    try {
+        $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[0]))
+        $payload = $payloadJson | ConvertFrom-Json
+    }
+    catch {
+        throw "Package provenance probe returned invalid structured data: $($_.Exception.Message)"
+    }
+    $actualPackageRoot = if (
+        $null -ne $payload.PSObject.Properties["packageRoot"] -and
+        $payload.packageRoot -is [string] -and
+        -not [string]::IsNullOrWhiteSpace([string]$payload.packageRoot)
+    ) {
+        [IO.Path]::GetFullPath([string]$payload.packageRoot).TrimEnd('\', '/')
+    }
+    else {
+        $null
+    }
+    $sourceKind = if ($null -ne $actualPackageRoot -and $actualPackageRoot -ieq $expectedPackageRoot) {
+        "repository-source"
+    }
+    elseif ($null -ne $actualPackageRoot -and $actualPackageRoot -match '(?i)[\\/]site-packages[\\/]') {
+        "installed-wheel"
+    }
+    else {
+        "foreign-source"
+    }
+    $packageFileSha256 = if (
+        $null -ne $payload.PSObject.Properties["packageFile"] -and
+        $payload.packageFile -is [string] -and
+        -not [string]::IsNullOrWhiteSpace([string]$payload.packageFile) -and
+        (Test-Path -LiteralPath ([string]$payload.packageFile) -PathType Leaf)
+    ) {
+        Get-FileSha256Hex -Path ([string]$payload.packageFile)
+    }
+    else {
+        $null
+    }
+    $provenance = [pscustomobject]@{
+        pass = $false
+        capturedAtUtc = [DateTime]::UtcNow.ToString("o")
+        packageFile = $payload.packageFile
+        packageRoot = $payload.packageRoot
+        packageVersion = $payload.packageVersion
+        packageFileSha256 = $packageFileSha256
+        pythonVersion = $payload.pythonVersion
+        pythonExecutable = $payload.pythonExecutable
+        fastMcpVersion = $parts[1]
+        sourceKind = $sourceKind
+        expectedPackageRoot = $expectedPackageRoot
+        runtimeTreeDigestSha256 = $RuntimeSnapshot.runtimeTreeDigestSha256
+        runtimeFileCount = $RuntimeSnapshot.runtimeFileCount
+        expectedRuntimeChild = $parts[2] -eq "1"
+        probeLifecycle = $probe.cleanup
+    }
+    $provenance.pass = $RuntimeSnapshot.pass -eq $true -and
+        $probe.cleanup.pass -eq $true -and
+        -not [string]::IsNullOrWhiteSpace([string]$packageFileSha256) -and
+        (Test-ExecutedPackageProvenance -Provenance $provenance `
+            -ExpectedPackageRoot $expectedPackageRoot -ExpectedPythonExecutable $PythonExecutable)
+    return $provenance
+}
+
+function Assert-PreMeasurementSourceIntegrity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$RepositorySnapshot,
+        [Parameter(Mandatory = $true)]
+        [object]$PackageProvenance
+    )
+
+    if ($RepositorySnapshot.pass -ne $true) {
+        $dirty = @($RepositorySnapshot.dirtyTrackedPaths) -join ", "
+        throw "Tracked repository/runtime source is not clean and identical to HEAD. Dirty paths: $dirty"
+    }
+    if ($PackageProvenance.pass -ne $true) {
+        throw "Selected Python imported non-repository or incomplete everything_mcp source. Expected $($PackageProvenance.expectedPackageRoot); imported $($PackageProvenance.packageRoot); kind $($PackageProvenance.sourceKind)."
+    }
+}
+
+function Test-EvidenceIntegrityComplete {
+    param([object]$Integrity)
+
+    if ($null -eq $Integrity -or $Integrity.pass -ne $true) {
+        return $false
+    }
+    foreach ($phaseName in @("before", "after")) {
+        if (
+            $null -eq $Integrity.PSObject.Properties[$phaseName] -or
+            $Integrity.$phaseName.pass -ne $true -or
+            $Integrity.$phaseName.repository.trackedWorktreeClean -ne $true -or
+            $Integrity.$phaseName.repository.runtimeFilesMatchHead -ne $true -or
+            [int]$Integrity.$phaseName.repository.runtimeFileCount -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$Integrity.$phaseName.repository.gitHead) -or
+            [string]::IsNullOrWhiteSpace([string]$Integrity.$phaseName.repository.gitTree) -or
+            [string]::IsNullOrWhiteSpace([string]$Integrity.$phaseName.repository.runtimeTreeDigestSha256) -or
+            $Integrity.$phaseName.package.pass -ne $true -or
+            $Integrity.$phaseName.package.sourceKind -ne "repository-source" -or
+            [string]::IsNullOrWhiteSpace([string]$Integrity.$phaseName.package.packageFile) -or
+            [string]::IsNullOrWhiteSpace([string]$Integrity.$phaseName.package.packageRoot) -or
+            [string]::IsNullOrWhiteSpace([string]$Integrity.$phaseName.package.packageVersion) -or
+            [string]::IsNullOrWhiteSpace([string]$Integrity.$phaseName.package.packageFileSha256)
+        ) {
+            return $false
+        }
+    }
+    return @($Integrity.unchanged.PSObject.Properties | Where-Object { $_.Value -ne $true }).Count -eq 0
 }
 
 function Format-MiB {
@@ -3815,6 +4157,11 @@ function New-MarkdownSummary {
     $null = $lines.Add("- Script SHA-256: ``$($Evidence.integrity.scriptSha256)``")
     $null = $lines.Add("- Git HEAD: ``$($Evidence.integrity.gitHead)``; tree: ``$($Evidence.integrity.gitTree)``")
     $null = $lines.Add("- Script blob at HEAD: ``$($Evidence.integrity.headScriptBlob)``; measured blob: ``$($Evidence.integrity.workingScriptBlob)``; match/pass: ``$($Evidence.integrity.scriptMatchesHead)``/``$($Evidence.integrity.pass)``")
+    $null = $lines.Add("- Before repository: HEAD ``$($Evidence.integrity.before.repository.gitHead)``; tree ``$($Evidence.integrity.before.repository.gitTree)``; tracked clean ``$($Evidence.integrity.before.repository.trackedWorktreeClean)``; runtime files/match/digest ``$($Evidence.integrity.before.repository.runtimeFileCount)``/``$($Evidence.integrity.before.repository.runtimeFilesMatchHead)``/``$($Evidence.integrity.before.repository.runtimeTreeDigestSha256)``.")
+    $null = $lines.Add("- Before imported package: file ``$($Evidence.integrity.before.package.packageFile)``; root ``$($Evidence.integrity.before.package.packageRoot)``; version ``$($Evidence.integrity.before.package.packageVersion)``; file SHA-256 ``$($Evidence.integrity.before.package.packageFileSha256)``; kind ``$($Evidence.integrity.before.package.sourceKind)``; pass ``$($Evidence.integrity.before.package.pass)``.")
+    $null = $lines.Add("- After repository: HEAD ``$($Evidence.integrity.after.repository.gitHead)``; tree ``$($Evidence.integrity.after.repository.gitTree)``; tracked clean ``$($Evidence.integrity.after.repository.trackedWorktreeClean)``; runtime files/match/digest ``$($Evidence.integrity.after.repository.runtimeFileCount)``/``$($Evidence.integrity.after.repository.runtimeFilesMatchHead)``/``$($Evidence.integrity.after.repository.runtimeTreeDigestSha256)``.")
+    $null = $lines.Add("- After imported package: file ``$($Evidence.integrity.after.package.packageFile)``; root ``$($Evidence.integrity.after.package.packageRoot)``; version ``$($Evidence.integrity.after.package.packageVersion)``; file SHA-256 ``$($Evidence.integrity.after.package.packageFileSha256)``; kind ``$($Evidence.integrity.after.package.sourceKind)``; pass ``$($Evidence.integrity.after.package.pass)``.")
+    $null = $lines.Add("- Before/after unchanged checks: HEAD ``$($Evidence.integrity.unchanged.gitHead)``; tree ``$($Evidence.integrity.unchanged.gitTree)``; worktree ``$($Evidence.integrity.unchanged.trackedWorktreeClean)``; runtime digest ``$($Evidence.integrity.unchanged.runtimeTreeDigest)``; package path/root/version/hash ``$($Evidence.integrity.unchanged.packageFile)``/``$($Evidence.integrity.unchanged.packageRoot)``/``$($Evidence.integrity.unchanged.packageVersion)``/``$($Evidence.integrity.unchanged.packageFileSha256)``.")
     $null = $lines.Add("- Independent PID recheck JSON: ``$([IO.Path]::GetFileName($Evidence.pidRecheckPath))``")
     $null = $lines.Add("")
     $null = $lines.Add("## Pre-run probe lifecycle")
@@ -3940,18 +4287,18 @@ elseif (-not [IO.Path]::IsPathRooted($OutputDirectory)) {
 }
 $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
 $null = New-Item -ItemType Directory -Path $outputPath -Force
-$integrity = Get-EvidenceIntegrity -WorkingDirectory $repoRootPath -ScriptPath $PSCommandPath
 
 $startedAtUtc = [DateTime]::UtcNow
+$repositoryBefore = Get-RepositoryRuntimeSnapshot -WorkingDirectory $repoRootPath -ScriptPath $PSCommandPath
+$provenanceBefore = Get-ExecutedPackageProvenance -WorkingDirectory $repoRootPath `
+    -PythonExecutable $pythonExecutable -RuntimeSnapshot $repositoryBefore
+Assert-PreMeasurementSourceIntegrity -RepositorySnapshot $repositoryBefore `
+    -PackageProvenance $provenanceBefore
 try {
-    $probe = Invoke-PythonProbe -Executable $pythonExecutable `
-        -Code "import fastmcp, os, platform, sys; print(platform.python_version() + '|' + str(getattr(fastmcp, '__version__', 'unknown')) + '|' + ('1' if os.path.normcase(sys.executable) != os.path.normcase(getattr(sys, '_base_executable', sys.executable)) else '0'), flush=True); sys.stdin.readline()" `
-        -FailureMessage "FastMCP is required for the comparison. Install the project server extra into the selected interpreter."
-    $probeLifecycle = $probe.cleanup
-    $probeParts = ([string]$probe.output) -split '\|', 3
-    $pythonVersion = $probeParts[0]
-    $fastMcpVersion = if ($probeParts.Count -gt 1) { $probeParts[1] } else { "unknown" }
-    $expectRuntimeChild = $probeParts.Count -gt 2 -and $probeParts[2] -eq "1"
+    $probeLifecycle = $provenanceBefore.probeLifecycle
+    $pythonVersion = $provenanceBefore.pythonVersion
+    $fastMcpVersion = $provenanceBefore.fastMcpVersion
+    $expectRuntimeChild = $provenanceBefore.expectedRuntimeChild
 
     $lite = Invoke-BackendMeasurement -Backend "lite" -Module "everything_mcp.lite_stdio" -Executable $pythonExecutable `
         -WorkingDirectory $repoRootPath -SdkPath $sdkPath -ScopePath $scopePath -SearchQuery $Query `
@@ -3966,6 +4313,12 @@ try {
         -SearchSort $Sort -SearchMetadata ([bool]$Metadata) -ResponseTimeout $ResponseTimeoutSeconds `
         -ExitTimeout $ExitTimeoutSeconds -ExpectRuntimeChild $expectRuntimeChild -ProcessRegistry $ActiveSessions `
         -OwnedRegistry $OwnedProcessRecords
+
+    $repositoryAfter = Get-RepositoryRuntimeSnapshot -WorkingDirectory $repoRootPath -ScriptPath $PSCommandPath
+    $provenanceAfter = Get-ExecutedPackageProvenance -WorkingDirectory $repoRootPath `
+        -PythonExecutable $pythonExecutable -RuntimeSnapshot $repositoryAfter
+    $integrity = New-EvidenceIntegrity -BeforeSnapshot $repositoryBefore -AfterSnapshot $repositoryAfter `
+        -BeforeProvenance $provenanceBefore -AfterProvenance $provenanceAfter
 
     $liteMemoryValidation = Assert-ValidMemoryEvidence -BackendRun $lite -ExpectedSessions $Sessions
     $fastMcpMemoryValidation = Assert-ValidMemoryEvidence -BackendRun $fastMcp -ExpectedSessions $Sessions
@@ -4001,7 +4354,8 @@ try {
         pass = $idleRatio -le 0.5
     }
     $processAudit = Invoke-OwnedPidAudit -OwnedRegistry $OwnedProcessRecords
-    $allAuditEntries = @($probeLifecycle.ownedEntries) + @($processAudit.entries)
+    $allAuditEntries = @($probeLifecycle.ownedEntries) + @($processAudit.entries) +
+        @($provenanceAfter.probeLifecycle.ownedEntries)
     $independentPidRecheck = Invoke-IndependentPidRecheck -AuditEntries @($allAuditEntries)
     $independentPidRecheckComplete = Test-IndependentPidRecheckComplete -Recheck $independentPidRecheck
     $allSessionEvidence = @($lite.processes) + @($fastMcp.processes)
@@ -4015,13 +4369,14 @@ try {
         fastMcpProtocolAccountingCleanup = Test-BackendProtocolAccountingCleanup -BackendRun $fastMcp `
             -ExpectedSessions $Sessions -ExpectedCycles $Cycles
         postRunPidAudit = Test-ProcessAuditComplete -Audit $processAudit
-        probeLifecycleCleanup = Test-ProbeLifecycleComplete -Lifecycle $probeLifecycle
+        probeLifecycleCleanup = (Test-ProbeLifecycleComplete -Lifecycle $probeLifecycle) -and
+            (Test-ProbeLifecycleComplete -Lifecycle $provenanceAfter.probeLifecycle)
         independentPidRecheck = $independentPidRecheckComplete
         exitCodeCompleteness = $exitCodeCompleteness
         memoryEvidenceValidation = $memoryValidation.pass -eq $true
         memoryStability = $liteStability.pass -eq $true -and $fastMcpStability.pass -eq $true
         liteFastMcpIdleRatio = $idleGate.pass -eq $true
-        evidenceIntegrity = $integrity.pass -eq $true
+        evidenceIntegrity = Test-EvidenceIntegrityComplete -Integrity $integrity
     }
     $overallPass = Test-AllExplicitPassComponents -Components $overallComponents
     $timestamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss'Z'")
@@ -4030,7 +4385,7 @@ try {
     $pidRecheckPath = Join-Path $outputPath "task-7-pid-recheck-$timestamp.json"
 
     $evidence = [pscustomobject]@{
-        schemaVersion = 6
+        schemaVersion = 7
         generatedAtUtc = [DateTime]::UtcNow.ToString("o")
         durationSeconds = [Math]::Round(([DateTime]::UtcNow - $startedAtUtc).TotalSeconds, 3)
         integrity = $integrity
@@ -4063,6 +4418,7 @@ try {
         }
         backends = @($lite, $fastMcp)
         probeLifecycle = $probeLifecycle
+        postRunProvenanceLifecycle = $provenanceAfter.probeLifecycle
         processAudit = $processAudit
         independentPidRecheck = $independentPidRecheck
         pidRecheckPath = $pidRecheckPath
