@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from pathlib import PureWindowsPath
 from typing import TypeAlias
 
-POSITIVE_FILTER_PATTERN = re.compile(r"^(?:path:|ext:|dm:|dc:|rc:|size:|regex:)", re.IGNORECASE)
+POSITIVE_FILTER_PATTERN = re.compile(r"^(?:path:|ext:|dm:|dc:|rc:|size:)", re.IGNORECASE)
 DRIVE_ROOT_PATTERN = re.compile(r"^[a-z]:[\\/]*$", re.IGNORECASE)
 UNC_ROOT_PATTERN = re.compile(r"^[\\/]{2}[^\\/]+(?:[\\/]+[^\\/]+)?[\\/]*$")
 CONTENT_FUNCTIONS = frozenset({"content", "ansicontent", "utf8content", "utf16content", "utf16becontent"})
@@ -28,7 +27,6 @@ NARROWING_FUNCTIONS = frozenset(
         "rc",
         "recentchange",
         "size",
-        "regex",
     }
 )
 PREFIX_MODIFIERS = frozenset(
@@ -61,15 +59,6 @@ PREFIX_MODIFIERS = frozenset(
     }
 )
 UNIVERSAL_WILDCARDS = frozenset({"*", "*.*"})
-UNIVERSAL_PATTERN_SAMPLES = (
-    "a",
-    "README.md",
-    "0",
-    "_folder",
-    "two words.txt",
-    "한글.txt",
-    r"C:\Work\project\file.py",
-)
 MAX_QUERY_TOKENS = 256
 MAX_QUERY_BRANCHES = 128
 
@@ -122,6 +111,8 @@ class _TermInfo:
     root_path: bool
     content_search: bool
     extension_filter: bool
+    regex_search: bool
+    pattern_modifier: bool
 
 
 def compose_query(query: str, scope: str | None = None) -> str:
@@ -185,6 +176,10 @@ def is_safe_query(query: str, scope: str | None = None) -> bool:
             return False
         meaningful = tuple(info for info in positive if info.meaningful)
         if not meaningful:
+            return False
+        if any(info.regex_search for info, _ in analysed) and not any(
+            info.narrowing_filter and not info.content_search and not info.pattern_modifier for info in positive
+        ):
             return False
         if any(info.content_search for info, _ in analysed):
             if not has_scope or not any(info.narrowing_filter and not info.content_search for info in positive):
@@ -492,11 +487,13 @@ def _analyse_term(raw: str) -> _TermInfo:
         return _TermInfo(
             valid=valid,
             meaningful=meaningful,
-            narrowing_filter=meaningful and not content_search,
+            narrowing_filter=meaningful and not content_search and not active_regex,
             path_signal=path_signal,
             root_path=path_signal and is_root_scope(value),
             content_search=content_search,
             extension_filter=extension_filter,
+            regex_search=active_regex,
+            pattern_modifier=True,
         )
     if content_search or separator and lowered_function in NARROWING_FUNCTIONS:
         value = _unquote_phrase(function_value)
@@ -513,6 +510,8 @@ def _analyse_term(raw: str) -> _TermInfo:
             root_path=root_path,
             content_search=content_search,
             extension_filter=extension_filter,
+            regex_search=False,
+            pattern_modifier=False,
         )
 
     value = _unquote_phrase(text)
@@ -528,6 +527,8 @@ def _analyse_term(raw: str) -> _TermInfo:
         root_path=path_signal and is_root_scope(unquoted),
         content_search=False,
         extension_filter=False,
+        regex_search=False,
+        pattern_modifier=False,
     )
 
 
@@ -537,18 +538,15 @@ def _pattern_is_meaningful(value: str, regex_mode: bool | None) -> tuple[bool, b
         return False, True
     if regex_mode:
         try:
-            pattern = re.compile(stripped)
+            re.compile(stripped)
         except re.error:
             return False, False
-        universal = pattern.search("") is not None or all(
-            pattern.search(sample) is not None for sample in UNIVERSAL_PATTERN_SAMPLES
-        )
-        return not universal, True
+        return True, True
     if stripped in UNIVERSAL_WILDCARDS or stripped and set(stripped) == {"*"}:
         return False, True
-    if regex_mode is False and all(fnmatchcase(sample, stripped) for sample in UNIVERSAL_PATTERN_SAMPLES):
-        return False, True
     return True, True
+
+
 def _unquote_phrase(value: str) -> str:
     text = value.strip()
     if len(text) >= 2 and text.startswith('"') and text.endswith('"'):

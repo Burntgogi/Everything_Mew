@@ -76,16 +76,29 @@ SAFETY_MATRIX = (
     ("OR size filter with universal branch", "size:>0|*", None, True),
     ("OR path filter with universal branch", r"path:C:\Work|*", None, True),
     ("scoped filename with universal OR branch", "foo | *", r"C:\Work\project", True),
-    ("universal regular expression", "regex:.*", None, True),
-    ("quoted universal regular expression", 'regex:"^.*$"', None, True),
-    ("one-or-more universal regular expression", "regex:.+", None, True),
-    ("anchored one-or-more universal regular expression", "regex:^.+$", None, True),
-    ("nested path universal regular expression", "regex:path:.*", None, True),
-    ("nested modifiers universal regular expression", "case:regex:path:^.+$", None, True),
-    ("nested function universal regular expression", "regex:size:.+", None, True),
+    ("regex-only expression", "regex:.*", None, True),
+    ("quoted regex-only expression", 'regex:"^.*$"', None, True),
+    ("one-or-more regex-only expression", "regex:.+", None, True),
+    ("anchored regex-only expression", "regex:^.+$", None, True),
+    ("adversarial leaf regex", r"regex:^[^\\/]+$", None, True),
+    ("scoped adversarial leaf regex", r"regex:^[^\\/]+$", r"C:\Work\project", True),
+    ("nested path regex-only expression", "regex:path:.*", None, True),
+    ("nested modifier adversarial regex", r"case:regex:path:^[^\\/]+$", r"C:\Work\project", True),
+    ("nested function regex-only expression", "regex:size:.+", None, True),
     ("nested path universal wildcard", "wildcards:path:**", None, True),
     ("nested modifiers universal wildcard", "case:wildcards:path:***", None, True),
-    ("legitimate filename regular expression", r"regex:^README.*\.md$", None, False),
+    ("specific regex still needs indexed filter", r"regex:^README.*\.md$", r"C:\Work\project", True),
+    ("extension plus specific regex", r"ext:md regex:^README.*\.md$", None, False),
+    ("size comparison plus adversarial regex", r"size:>1mb regex:^[^\\/]+$", None, False),
+    ("path filter plus adversarial regex", r"path:C:\Work regex:^[^\\/]+$", None, False),
+    ("plain filename does not narrow regex", r"README.md regex:^README", r"C:\Work\project", True),
+    ("wildcard modifier does not narrow regex", r"regex:^[^\\/]+$ wildcards:*.py", None, True),
+    (
+        "nested wildcard modifier does not narrow regex",
+        r"regex:^test case:wildcards:path:C:\Work\*.py",
+        None,
+        True,
+    ),
     ("legitimate scoped wildcard", r"wildcards:path:C:\Work\*.md", None, False),
     ("greater-than size comparison", "size:>1mb", None, False),
     ("greater-than-or-equal date comparison", "dm:>=2025-01-01", None, False),
@@ -125,6 +138,11 @@ def test_positive_narrowing_filter_uses_only_real_positive_filter_terms(query: s
     assert query_module.has_positive_narrowing_filter(query) is expected
 
 
+def test_regex_is_not_reported_as_a_positive_indexed_filter() -> None:
+    assert query_module.has_positive_narrowing_filter(r"regex:^test") is False
+    assert query_module.has_positive_narrowing_filter(r"ext:py regex:^test") is True
+
+
 @pytest.mark.parametrize(
     "content_function",
     ("content", "ansicontent", "utf8content", "utf16content", "utf16becontent"),
@@ -148,11 +166,33 @@ def test_content_policy_is_enforced_per_or_alternative() -> None:
     ) is False
 
 
+def test_regex_requires_a_separate_indexed_filter_in_every_or_branch() -> None:
+    assert server.is_broad_query(
+        r"<ext:py regex:^test>|<ext:txt regex:^document>",
+        scope=r"C:\Work\project",
+    ) is False
+    assert server.is_broad_query(
+        r"<ext:py regex:^test>|regex:^document",
+        scope=r"C:\Work\project",
+    ) is True
+
+
+def test_content_and_regex_require_a_separate_indexed_filter() -> None:
+    assert server.is_broad_query(
+        r"content:needle regex:^[^\\/]+$",
+        scope=r"C:\Work\project",
+    ) is True
+    assert server.is_broad_query(
+        r"content:needle regex:^[^\\/]+$ ext:txt",
+        scope=r"C:\Work\project",
+    ) is False
+
+
 @pytest.mark.parametrize(
     "universal_filter",
     ("regex:.+", "regex:path:.*", "regex:size:.+", "wildcards:path:**", "case:regex:path:^.+$"),
 )
-def test_universal_patterns_do_not_narrow_content_searches(universal_filter: str) -> None:
+def test_pattern_modifiers_do_not_replace_an_indexed_content_filter(universal_filter: str) -> None:
     assert server.is_broad_query(
         f"content:needle {universal_filter}",
         scope=r"C:\Work\project",

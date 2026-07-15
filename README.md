@@ -56,9 +56,13 @@ hosts that keep one server process alive per active session.
   adapter instances. Timed-out replies cannot match a later query even if
   Windows reuses a window handle, and failed window cleanup retains the ctypes
   callback for a safe retry.
-- Universal regular expressions and wildcard variants, including nested
-  modifiers, no longer count as narrowing filters; official `<`, `>`, `<=`,
-  and `>=` function comparisons remain valid alongside `< >` grouping.
+- Regular expressions, including nested modifier forms, never count as an
+  indexed narrowing filter. Every OR branch containing regex must also contain
+  a separate indexed, non-universal filter such as `ext:py`; a non-root scope
+  alone is insufficient, and another regex or wildcard modifier does not
+  satisfy this requirement. Universal wildcard variants remain non-narrowing,
+  while official `<`, `>`, `<=`, and `>=` comparisons remain valid alongside
+  `< >` grouping.
 - ES metadata CSV is decoded explicitly as UTF-8, and SDK result paths use the
   official required-length query before an exact-size copy.
 
