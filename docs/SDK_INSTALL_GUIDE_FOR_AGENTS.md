@@ -34,6 +34,16 @@ The MCP is SDK-first. `es.exe` is only a fallback when SDK/IPC is unavailable.
 
 ## Recommended Install Strategy
 
+Create a project-local environment and install the runtime-only lite path. This
+is the default for always-enabled MCP hosts and does not install FastMCP:
+
+```powershell
+py -m venv .venv
+$python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
+& $python -m pip install -e .
+& $python -m pip check
+```
+
 Official C docs recommend copying the DLL beside the consuming program executable. For OpenCode MCP usage, prefer a user-writable support directory and configure the MCP environment explicitly:
 
 ```powershell
@@ -47,7 +57,7 @@ Set the official OpenCode environment substitution in global config:
   "mcp": {
     "everything-mew": {
       "type": "local",
-      "command": ["everything-mew"],
+      "command": ["everything-mew-lite"],
       "enabled": true,
       "timeout": 20000,
       "environment": {
@@ -164,7 +174,26 @@ fallback:
    opencode
    ```
 
-8. Validate with read-only tool calls:
+8. Validate the lite MCP lifecycle without importing FastMCP, then make
+   read-only tool calls:
+
+   ```python
+   from everything_mcp.lite_stdio import LiteSession, handle_message
+
+   session = LiteSession()
+   response = handle_message({
+       "jsonrpc": "2.0",
+       "id": 1,
+       "method": "initialize",
+       "params": {
+           "protocolVersion": "2025-11-25",
+           "capabilities": {},
+           "clientInfo": {"name": "install-check", "version": "1"},
+       },
+   }, session)
+   assert response is not None
+   assert response["result"]["serverInfo"]["name"] == "Everything_Mew_Lite"
+   ```
 
    ```python
    from everything_mcp.server import everything_status, everything_count, everything_search
@@ -173,6 +202,10 @@ fallback:
    print(everything_count("ext:md", scope=r"C:\Path\to\project"))
    print(everything_search("ext:md", scope=r"C:\Path\to\project", limit=5, metadata=True))
    ```
+
+FastMCP is optional. If a host explicitly requires the legacy
+`everything-mew` entrypoint, install `.[server]` and validate `create_mcp()` as
+a separate compatibility step; it is not required for the lite path.
 
 Expected healthy status:
 

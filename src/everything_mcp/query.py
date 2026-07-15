@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import PureWindowsPath
 from typing import TypeAlias
 
@@ -60,6 +61,15 @@ PREFIX_MODIFIERS = frozenset(
     }
 )
 UNIVERSAL_WILDCARDS = frozenset({"*", "*.*"})
+UNIVERSAL_PATTERN_SAMPLES = (
+    "a",
+    "README.md",
+    "0",
+    "_folder",
+    "two words.txt",
+    "한글.txt",
+    r"C:\Work\project\file.py",
+)
 MAX_QUERY_TOKENS = 256
 MAX_QUERY_BRANCHES = 128
 
@@ -301,6 +311,7 @@ def _tokenize(query: str) -> tuple[_Token, ...]:
 
         start = position
         quoted = False
+        comparison_consumed = False
         while position < len(query):
             character = query[position]
             if character == '"':
@@ -310,8 +321,15 @@ def _tokenize(query: str) -> tuple[_Token, ...]:
                 quoted = not quoted
                 position += 1
                 continue
-            if not quoted and (character.isspace() or character in "|<>"):
-                break
+            if not quoted:
+                if character.isspace() or character == "|":
+                    break
+                if character in "<>":
+                    if not comparison_consumed and query[start:position].endswith(":"):
+                        comparison_consumed = True
+                        position += 1
+                        continue
+                    break
             position += 1
         if quoted:
             raise QuerySyntaxError("unterminated quote")
@@ -446,15 +464,15 @@ def _analyse_term(raw: str) -> _TermInfo:
         if lowered_name == "path":
             path_signal = True
             text = value
-            break
+            continue
         if lowered_name == "regex":
             active_regex = True
             text = value
-            break
+            continue
         if lowered_name == "wildcards":
             active_wildcards = True
             text = value
-            break
+            continue
         if lowered_name in PREFIX_MODIFIERS:
             text = value
             continue
@@ -464,6 +482,22 @@ def _analyse_term(raw: str) -> _TermInfo:
     lowered_function = function_name.lower()
     content_search = bool(separator and lowered_function in CONTENT_FUNCTIONS)
     extension_filter = bool(separator and lowered_function == "ext")
+    if active_regex or active_wildcards:
+        nested_function = bool(separator and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", function_name))
+        value = _unquote_phrase(function_value if nested_function else text)
+        path_signal = path_signal or bool(
+            nested_function and lowered_function in {"path", "parent", "infolder", "nosubfolders"}
+        )
+        meaningful, valid = _pattern_is_meaningful(value, active_regex)
+        return _TermInfo(
+            valid=valid,
+            meaningful=meaningful,
+            narrowing_filter=meaningful and not content_search,
+            path_signal=path_signal,
+            root_path=path_signal and is_root_scope(value),
+            content_search=content_search,
+            extension_filter=extension_filter,
+        )
     if content_search or separator and lowered_function in NARROWING_FUNCTIONS:
         value = _unquote_phrase(function_value)
         regex_mode = lowered_function == "regex"
@@ -482,10 +516,7 @@ def _analyse_term(raw: str) -> _TermInfo:
         )
 
     value = _unquote_phrase(text)
-    if active_regex:
-        meaningful, valid = _pattern_is_meaningful(value, True)
-        return _TermInfo(valid, meaningful, meaningful, path_signal, False, False, False)
-    meaningful, valid = _pattern_is_meaningful(value, False if active_wildcards else None)
+    meaningful, valid = _pattern_is_meaningful(value, None)
     unquoted = _unquote_path(value)
     raw_path_signal = bool(re.match(r"(?:[a-z]:[\\/]|[\\/]{2})", unquoted, re.IGNORECASE))
     path_signal = path_signal or raw_path_signal
@@ -509,12 +540,15 @@ def _pattern_is_meaningful(value: str, regex_mode: bool | None) -> tuple[bool, b
             pattern = re.compile(stripped)
         except re.error:
             return False, False
-        return pattern.search("") is None, True
-    if stripped in UNIVERSAL_WILDCARDS:
+        universal = pattern.search("") is not None or all(
+            pattern.search(sample) is not None for sample in UNIVERSAL_PATTERN_SAMPLES
+        )
+        return not universal, True
+    if stripped in UNIVERSAL_WILDCARDS or stripped and set(stripped) == {"*"}:
+        return False, True
+    if regex_mode is False and all(fnmatchcase(sample, stripped) for sample in UNIVERSAL_PATTERN_SAMPLES):
         return False, True
     return True, True
-
-
 def _unquote_phrase(value: str) -> str:
     text = value.strip()
     if len(text) >= 2 and text.startswith('"') and text.endswith('"'):

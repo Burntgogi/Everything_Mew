@@ -207,16 +207,20 @@ def test_agent_guide_installs_clean_environment_before_running_checks() -> None:
         "From the repository root",
         "py -m venv .venv",
         '$python = (Resolve-Path ".\\.venv\\Scripts\\python.exe").Path',
-        '& $python -m pip install -e ".[dev,server]"',
+        "& $python -m pip install -e .",
         "& $python -m pip check",
-        "& $python -m pytest -q",
         "$scriptsDir = Split-Path -Parent $python",
     )
 
     positions = [install_section.index(step) for step in ordered_steps]
     assert positions == sorted(positions)
     assert install_section.count("-m pip install") == 1
+    assert 'pip install -e ".[dev]"' not in install_section
     assert 'pip install -e ".[server]"' not in install_section
+    assert "FastMCP validation is optional" in source
+    assert '"command": ["everything-mew-lite"]' in source
+    assert "from everything_mcp.lite_stdio import" in source
+    assert "Expected server type" not in source
     assert "py -m pip" not in install_section
     assert "py -m pytest" not in install_section
 
@@ -246,6 +250,16 @@ def test_agent_guide_reuses_pointer_width_selected_dll_without_overwrite() -> No
         for line in powershell.splitlines()
         if "Everything64.dll" in line
     )
+
+
+def test_sdk_guide_defaults_to_runtime_only_lite_install() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    source = (repository_root / "docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md").read_text(encoding="utf-8")
+
+    assert '& $python -m pip install -e .' in source
+    assert '"command": ["everything-mew-lite"]' in source
+    assert "FastMCP is optional" in source
+    assert "from everything_mcp.lite_stdio import" in source
 
 
 def test_lite_stdio_does_not_import_heavy_mcp_runtimes_on_load() -> None:

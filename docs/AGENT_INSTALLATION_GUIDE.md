@@ -37,15 +37,14 @@ official voidtools Everything SDK over local IPC.
 ## Install The Runtime
 
 From the repository root, create the intended virtual environment, resolve its
-Python executable once, and install all development and server dependencies
-before running checks:
+Python executable once, and install only the lite runtime. FastMCP and the
+development toolchain are not part of this default path:
 
 ```powershell
 py -m venv .venv
 $python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
-& $python -m pip install -e ".[dev,server]"
+& $python -m pip install -e .
 & $python -m pip check
-& $python -m pytest -q
 ```
 
 Keep using `$python` from this repository-root PowerShell session. Verify the
@@ -53,12 +52,7 @@ entrypoints installed beside that interpreter:
 
 ```powershell
 $scriptsDir = Split-Path -Parent $python
-$entrypointNames = @(
-    "everything-mew.exe",
-    "everything-mcp.exe",
-    "everything-mew-lite.exe",
-    "everything-mcp-lite.exe"
-)
+$entrypointNames = @("everything-mew-lite.exe", "everything-mcp-lite.exe")
 foreach ($entrypointName in $entrypointNames) {
     $entrypoint = Join-Path $scriptsDir $entrypointName
     if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) {
@@ -84,6 +78,17 @@ Write-Host "OpenCode skill destination: $skillDest"
 
 Preserve any existing skill file unless the user explicitly approves replacing
 it.
+
+## Optional Development Audit
+
+For an optional source-checkout audit, install the development tools only after
+the runtime path above is healthy, then run the test suite. This still does not
+install FastMCP:
+
+```powershell
+& $python -m pip install -e ".[dev]"
+& $python -m pytest -q
+```
 
 ## Select And Install The SDK DLL
 
@@ -144,7 +149,7 @@ existing MCP entries, and add this valid local MCP shape:
   "mcp": {
     "everything-mew": {
       "type": "local",
-      "command": ["everything-mew"],
+      "command": ["everything-mew-lite"],
       "enabled": true,
       "timeout": 20000,
       "environment": {
@@ -218,13 +223,32 @@ if ((Split-Path -Leaf $dest) -ne $dllName) {
 if ($env:EVERYTHING_SDK_DLL -ne $dest.Replace("\", "/")) {
     throw "EVERYTHING_SDK_DLL does not match the selected DLL path."
 }
-& $python -c "from everything_mcp.server import create_mcp; print(type(create_mcp()).__name__)"
+@'
+from everything_mcp.lite_stdio import LiteSession, handle_message
+
+session = LiteSession()
+response = handle_message({
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "clientInfo": {"name": "install-check", "version": "1"}
+    }
+}, session)
+assert response is not None
+assert response["result"]["serverInfo"]["name"] == "Everything_Mew_Lite"
+print(response["result"]["serverInfo"])
+'@ | & $python -
 ```
 
-Expected server type:
+FastMCP validation is optional. Only when the host explicitly requires the
+legacy FastMCP entrypoint, install and validate it separately:
 
-```text
-FastMCP
+```powershell
+& $python -m pip install -e ".[server]"
+& $python -c "from everything_mcp.server import create_mcp; print(type(create_mcp()).__name__)"
 ```
 
 Use OpenCode MCP tools or direct Python from that same session for read-only

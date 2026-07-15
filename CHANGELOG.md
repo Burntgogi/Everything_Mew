@@ -28,6 +28,11 @@ change only when the release branch is cut.
   every possible query branch.
 - Replace the unbounded synchronous SDK query with the official asynchronous
   reply-window flow and a 15-second deadline, serialized through reset.
+- Allocate non-reused reply IDs process-wide, serialize SDK state across
+  adapter instances, reject stale replies after HWND reuse, and retain failed
+  Win32 callback cleanup for retry.
+- Reject universal regex/wildcard filters through nested modifiers while
+  preserving official size/date comparisons and conservative regex searches.
 - Decode ES metadata CSV as UTF-8 and retrieve SDK paths with the documented
   required-length call, including the exact 32,767-character limit.
 - Make `everything-mew-lite` the primary always-on configuration example while
@@ -50,6 +55,11 @@ change only when the release branch is cut.
   적용합니다.
 - 무제한 동기 SDK 쿼리를 공식 비동기 응답 창 흐름과 15초 제한으로 교체하고,
   Reset까지 직렬화합니다.
+- 프로세스 전체에서 재사용하지 않는 응답 ID를 할당하고 어댑터 간 SDK 상태를
+  직렬화하며, HWND가 재사용되어도 오래된 응답을 거부하고 Win32 콜백 정리
+  실패 객체를 재시도할 때까지 보존합니다.
+- 중첩 modifier를 통과한 전체 일치 정규식·와일드카드를 거부하면서 공식
+  크기·날짜 비교식과 보수적인 정규식 검색은 유지합니다.
 - ES 메타데이터 CSV를 UTF-8로 디코딩하고, 문서화된 필요 길이 호출로 SDK
   경로를 가져와 정확히 32,767자인 경로까지 처리합니다.
 - 항상 켜 두는 기본 설정 예시는 `everything-mew-lite`로 변경하고 FastMCP는

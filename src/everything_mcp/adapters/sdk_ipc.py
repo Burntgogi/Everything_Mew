@@ -95,6 +95,44 @@ class _QueryReplyWindow(Protocol):
     def close(self) -> None: ...
 
 
+_MAX_REPLY_ID = 0xFFFFFFFF
+_REPLY_ID_LOCK = threading.Lock()
+_REPLY_ID_COUNTER = 0
+_SDK_OPERATION_LOCK = threading.RLock()
+_FAILED_REPLY_WINDOWS_LOCK = threading.Lock()
+_FAILED_REPLY_WINDOWS: set[Any] = set()
+
+
+def _next_process_reply_identifier() -> int:
+    global _REPLY_ID_COUNTER
+    with _REPLY_ID_LOCK:
+        if _REPLY_ID_COUNTER >= _MAX_REPLY_ID:
+            raise QueryError("Everything SDK reply identifiers are exhausted; restart the MCP process before retrying.")
+        _REPLY_ID_COUNTER += 1
+        return _REPLY_ID_COUNTER
+
+
+def _quarantine_reply_window(window: _QueryReplyWindow) -> None:
+    with _FAILED_REPLY_WINDOWS_LOCK:
+        _FAILED_REPLY_WINDOWS.add(window)
+
+
+def _release_reply_window(window: _QueryReplyWindow) -> None:
+    with _FAILED_REPLY_WINDOWS_LOCK:
+        _FAILED_REPLY_WINDOWS.discard(window)
+
+
+def _retry_quarantined_reply_windows() -> None:
+    with _FAILED_REPLY_WINDOWS_LOCK:
+        retained = tuple(_FAILED_REPLY_WINDOWS)
+    for window in retained:
+        try:
+            window.close()
+        except BaseException:
+            continue
+        _release_reply_window(window)
+
+
 class _Win32QueryReplyWindow:
     def __init__(self, dll: Any, reply_id: int) -> None:
         self._dll = dll
@@ -102,6 +140,9 @@ class _Win32QueryReplyWindow:
         self._received = False
         self._callback_failed = False
         self._closed = False
+        self._window_destroyed = True
+        self._class_unregistered = True
+        self.hwnd = 0
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._configure_win32()
@@ -125,6 +166,7 @@ class _Win32QueryReplyWindow:
         self._atom = int(self._user32.RegisterClassW(ctypes.byref(window_class)))
         if self._atom == 0:
             raise OSError("Could not register the Everything SDK reply window class.")
+        self._class_unregistered = False
         hwnd = self._user32.CreateWindowExW(
             0,
             self._class_name,
@@ -140,9 +182,14 @@ class _Win32QueryReplyWindow:
             None,
         )
         if not hwnd:
-            self._user32.UnregisterClassW(self._class_name, self._instance)
+            if self._user32.UnregisterClassW(self._class_name, self._instance):
+                self._class_unregistered = True
+                self._closed = True
+            else:
+                _quarantine_reply_window(self)
             raise OSError("Could not create the Everything SDK reply window.")
         self.hwnd = int(hwnd)
+        self._window_destroyed = False
 
     def _configure_win32(self) -> None:
         self._kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
@@ -233,11 +280,21 @@ class _Win32QueryReplyWindow:
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
-        destroy_ok = bool(self._user32.DestroyWindow(self.hwnd))
-        unregister_ok = bool(self._user32.UnregisterClassW(self._class_name, self._instance))
-        if not destroy_ok or not unregister_ok:
+        if not self._window_destroyed:
+            if not self._user32.DestroyWindow(self.hwnd):
+                _quarantine_reply_window(self)
+                raise OSError("Everything SDK reply window cleanup failed.")
+            self._window_destroyed = True
+        if not self._class_unregistered:
+            if not self._user32.UnregisterClassW(self._class_name, self._instance):
+                _quarantine_reply_window(self)
+                raise OSError("Everything SDK reply window cleanup failed.")
+            self._class_unregistered = True
+        self._closed = self._window_destroyed and self._class_unregistered
+        if not self._closed:
+            _quarantine_reply_window(self)
             raise OSError("Everything SDK reply window cleanup failed.")
+        _release_reply_window(self)
 
 
 def _create_query_reply_window(dll: Any, reply_id: int) -> _QueryReplyWindow:
@@ -251,8 +308,6 @@ class SdkIpcAdapter:
         self.config = config or EverythingConfig.from_env()
         self._dll: Any | None = None
         self._load_error: str | None = None
-        self._operation_lock = threading.RLock()
-        self._reply_id = 0
         self._load_dll()
 
     def _candidate_dll(self) -> Path | None:
@@ -461,11 +516,7 @@ class SdkIpcAdapter:
             return result
 
     def _lock(self) -> threading.RLock:
-        lock = getattr(self, "_operation_lock", None)
-        if lock is None:
-            lock = threading.RLock()
-            self._operation_lock = lock
-        return lock
+        return _SDK_OPERATION_LOCK
 
     def _ensure_ready(self) -> None:
         status = self.status()
@@ -485,10 +536,11 @@ class SdkIpcAdapter:
 
     def _query(self) -> None:
         dll = self._ready_dll()
+        _retry_quarantined_reply_windows()
         reply_id = self._next_reply_identifier()
         reply_window = _create_query_reply_window(dll, reply_id)
-        primary_failure = False
-        cleanup_failed = False
+        primary_failure: BaseException | None = None
+        primary_traceback: Any | None = None
         try:
             dll.Everything_SetReplyWindow(reply_window.hwnd)
             dll.Everything_SetReplyID(reply_id)
@@ -502,25 +554,39 @@ class SdkIpcAdapter:
                 raise QueryError(
                     f"Everything SDK query timed out after {SDK_QUERY_TIMEOUT_SECONDS:g} seconds; refine the query or restart Everything."
                 )
-        except BaseException:
-            primary_failure = True
-            raise
-        finally:
-            try:
-                dll.Everything_SetReplyWindow(0)
-            except BaseException:
-                cleanup_failed = True
-            try:
-                reply_window.close()
-            except BaseException:
-                cleanup_failed = True
-            if cleanup_failed and not primary_failure:
-                raise QueryError("Everything SDK reply window cleanup failed; restart Everything and retry.")
+        except BaseException as exc:
+            primary_failure = exc
+            primary_traceback = exc.__traceback__
+
+        cleanup_failures: list[BaseException] = []
+        try:
+            dll.Everything_SetReplyWindow(0)
+        except BaseException as exc:
+            cleanup_failures.append(exc)
+        try:
+            reply_window.close()
+        except BaseException as exc:
+            cleanup_failures.append(exc)
+            _quarantine_reply_window(reply_window)
+
+        if primary_failure is not None:
+            if cleanup_failures and isinstance(primary_failure, Exception):
+                raise QueryError(
+                    f"{primary_failure} Everything SDK reply window cleanup also failed; "
+                    "the callback was retained for a later cleanup retry."
+                ) from primary_failure
+            if cleanup_failures:
+                primary_failure.add_note(
+                    "Everything SDK reply window cleanup also failed; the callback was retained for retry."
+                )
+            raise primary_failure.with_traceback(primary_traceback)
+        if cleanup_failures:
+            raise QueryError(
+                "Everything SDK reply window cleanup failed; the callback was retained for a later cleanup retry."
+            )
 
     def _next_reply_identifier(self) -> int:
-        reply_id = (getattr(self, "_reply_id", 0) + 1) & 0xFFFFFFFF
-        self._reply_id = reply_id or 1
-        return self._reply_id
+        return _next_process_reply_identifier()
 
     def _result_full_path(self, index: int) -> str:
         dll = self._ready_dll()

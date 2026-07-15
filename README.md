@@ -52,6 +52,13 @@ hosts that keep one server process alive per active session.
   scope and an additional indexed narrowing filter in every possible branch.
 - SDK queries use the official asynchronous reply-window API with a bounded
   15-second message wait instead of an unbounded synchronous DLL call.
+- Reply identifiers and SDK state are process-wide and serialized across
+  adapter instances. Timed-out replies cannot match a later query even if
+  Windows reuses a window handle, and failed window cleanup retains the ctypes
+  callback for a safe retry.
+- Universal regular expressions and wildcard variants, including nested
+  modifiers, no longer count as narrowing filters; official `<`, `>`, `<=`,
+  and `>=` function comparisons remain valid alongside `< >` grouping.
 - ES metadata CSV is decoded explicitly as UTF-8, and SDK result paths use the
   official required-length query before an exact-size copy.
 

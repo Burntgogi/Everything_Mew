@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+import gc
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pytest import MonkeyPatch
@@ -233,8 +235,6 @@ def _adapter(dll: object, everything_exe: Path = Path(r"C:\Program Files\Everyth
     adapter.config = EverythingConfig(everything_exe=everything_exe)
     adapter._dll = dll
     adapter._load_error = None
-    adapter._operation_lock = threading.RLock()
-    adapter._reply_id = 0
     return adapter
 
 
@@ -698,6 +698,61 @@ def test_sdk_timeout_resets_and_late_reply_cannot_poison_retry(monkeypatch: Monk
     assert dll.reset_calls == 2
 
 
+def test_sdk_reply_ids_are_unique_across_adapter_instances_and_reused_hwnd(monkeypatch: MonkeyPatch) -> None:
+    dll = QueryDll()
+    windows = [FakeReplyWindow(reply=False, hwnd=777), FakeReplyWindow(reply=True, hwnd=777)]
+    created_ids: list[int] = []
+
+    def create_window(received_dll: object, reply_id: int) -> FakeReplyWindow:
+        assert received_dll is dll
+        created_ids.append(reply_id)
+        return windows.pop(0)
+
+    monkeypatch.setattr(sdk_ipc, "_create_query_reply_window", create_window)
+    first_adapter = _adapter(dll)
+    second_adapter = _adapter(dll)
+
+    with pytest.raises(QueryError, match="timed out"):
+        first_adapter.count("ext:py", scope=r"C:\Work")
+    assert second_adapter.count("ext:py", scope=r"C:\Work") == 7
+
+    assert created_ids[0] != created_ids[1]
+    assert dll.reply_windows == [777, 0, 777, 0]
+    assert dll.reply_ids == created_ids
+
+
+def test_sdk_reply_identifier_exhaustion_never_reuses_an_old_id(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(sdk_ipc, "_REPLY_ID_COUNTER", sdk_ipc._MAX_REPLY_ID)
+
+    with pytest.raises(QueryError, match="identifiers are exhausted"):
+        _adapter(QueryDll())._next_reply_identifier()
+
+    assert sdk_ipc._REPLY_ID_COUNTER == sdk_ipc._MAX_REPLY_ID
+
+
+def test_reused_hwnd_rejects_late_reply_for_previous_identifier() -> None:
+    class ReplyDll:
+        def Everything_IsQueryReply(self, message: int, w_param: int, l_param: int, reply_id: int) -> bool:
+            return l_param == reply_id
+
+    class DefaultProc:
+        def DefWindowProcW(self, hwnd: int, message: int, w_param: int, l_param: int) -> int:
+            return 0
+
+    window = sdk_ipc._Win32QueryReplyWindow.__new__(sdk_ipc._Win32QueryReplyWindow)
+    raw_window = cast(Any, window)
+    raw_window._dll = ReplyDll()
+    raw_window._reply_id = 2
+    raw_window._received = False
+    raw_window._callback_failed = False
+    raw_window._user32 = DefaultProc()
+
+    assert window._handle_message(777, sdk_ipc.WM_COPYDATA, 0, 1) == 0
+    assert window._received is False
+    assert window._handle_message(777, sdk_ipc.WM_COPYDATA, 0, 2) == 1
+    assert window._received is True
+
+
 def test_sdk_reply_window_is_closed_when_async_query_post_fails(monkeypatch: MonkeyPatch) -> None:
     dll = QueryDll(failure="query")
     window = FakeReplyWindow(reply=True)
@@ -711,6 +766,136 @@ def test_sdk_reply_window_is_closed_when_async_query_post_fails(monkeypatch: Mon
     assert window.close_calls == 1
     assert dll.reply_windows == [window.hwnd, 0]
     assert dll.reset_calls == 1
+
+
+class CleanupUser32:
+    def __init__(self, *, destroy_results: list[bool], unregister_results: list[bool]) -> None:
+        self.destroy_results = destroy_results
+        self.unregister_results = unregister_results
+        self.destroy_calls = 0
+        self.unregister_calls = 0
+
+    def DestroyWindow(self, hwnd: int) -> bool:
+        self.destroy_calls += 1
+        return self.destroy_results.pop(0)
+
+    def UnregisterClassW(self, class_name: str, instance: int) -> bool:
+        self.unregister_calls += 1
+        return self.unregister_results.pop(0)
+
+
+def _cleanup_window(user32: CleanupUser32) -> sdk_ipc._Win32QueryReplyWindow:
+    window = sdk_ipc._Win32QueryReplyWindow.__new__(sdk_ipc._Win32QueryReplyWindow)
+    raw_window = cast(Any, window)
+    raw_window._user32 = user32
+    raw_window.hwnd = 4321
+    raw_window._class_name = "EverythingMewTestReply"
+    raw_window._instance = 1
+    raw_window._closed = False
+    raw_window._window_destroyed = False
+    raw_window._class_unregistered = False
+    raw_window._window_proc = object()
+    return window
+
+
+def test_reply_window_destroy_failure_is_retryable_and_not_marked_closed() -> None:
+    user32 = CleanupUser32(destroy_results=[False, True], unregister_results=[True])
+    window = _cleanup_window(user32)
+
+    with pytest.raises(OSError, match="cleanup failed"):
+        window.close()
+
+    assert window._closed is False
+    assert window._window_destroyed is False
+    assert window._class_unregistered is False
+
+    window.close()
+
+    assert window._closed is True
+    assert user32.destroy_calls == 2
+    assert user32.unregister_calls == 1
+
+
+def test_reply_window_unregister_failure_retries_without_redestroying_window() -> None:
+    user32 = CleanupUser32(destroy_results=[True], unregister_results=[False, True])
+    window = _cleanup_window(user32)
+
+    with pytest.raises(OSError, match="cleanup failed"):
+        window.close()
+
+    assert window._closed is False
+    assert window._window_destroyed is True
+    assert window._class_unregistered is False
+
+    window.close()
+
+    assert window._closed is True
+    assert user32.destroy_calls == 1
+    assert user32.unregister_calls == 2
+
+
+def test_primary_query_failure_surfaces_cleanup_failure_with_cause(monkeypatch: MonkeyPatch) -> None:
+    class FailingCloseWindow(FakeReplyWindow):
+        def close(self) -> None:
+            self.close_calls += 1
+            raise OSError("injected cleanup failure")
+
+    dll = QueryDll(failure="query")
+    window = FailingCloseWindow(reply=True)
+    monkeypatch.setattr(sdk_ipc, "_create_query_reply_window", lambda *_: window)
+    adapter = _adapter(dll)
+
+    with pytest.raises(QueryError) as caught:
+        adapter.count("ext:py", scope=r"C:\Work")
+
+    assert "query failed with error 0" in str(caught.value)
+    assert "cleanup also failed" in str(caught.value)
+    assert isinstance(caught.value.__cause__, QueryError)
+    assert window.close_calls == 1
+
+
+def test_failed_cleanup_quarantines_live_callback_until_retry_succeeds(monkeypatch: MonkeyPatch) -> None:
+    class Callback:
+        pass
+
+    class RetryableCloseWindow(FakeReplyWindow):
+        def __init__(self) -> None:
+            super().__init__(reply=True)
+            self.fail_cleanup = True
+            self._window_proc = Callback()
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.fail_cleanup:
+                raise OSError("injected cleanup failure")
+
+    sdk_ipc._FAILED_REPLY_WINDOWS.clear()
+    dll = QueryDll()
+    window = RetryableCloseWindow()
+    callback_ref = weakref.ref(window._window_proc)
+    window_ref = weakref.ref(window)
+    holder = [window]
+    monkeypatch.setattr(sdk_ipc, "_create_query_reply_window", lambda *_: holder.pop())
+    adapter = _adapter(dll)
+
+    with pytest.raises(QueryError, match="cleanup failed"):
+        adapter.count("ext:py", scope=r"C:\Work")
+
+    del window
+    gc.collect()
+    assert window_ref() is not None
+    assert callback_ref() is not None
+
+    retained = window_ref()
+    assert retained is not None
+    retained.fail_cleanup = False
+    sdk_ipc._retry_quarantined_reply_windows()
+    del retained
+    gc.collect()
+
+    assert sdk_ipc._FAILED_REPLY_WINDOWS == set()
+    assert window_ref() is None
+    assert callback_ref() is None
 
 
 def test_sdk_serializes_shared_query_and_reset_state(monkeypatch: MonkeyPatch) -> None:
@@ -736,12 +921,13 @@ def test_sdk_serializes_shared_query_and_reset_state(monkeypatch: MonkeyPatch) -
         return BlockingReplyWindow(len(factory_calls))
 
     monkeypatch.setattr(sdk_ipc, "_create_query_reply_window", create_window)
-    adapter = _adapter(dll)
+    first_adapter = _adapter(dll)
+    second_adapter = _adapter(dll)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(adapter.count, "ext:py", r"C:\Work")
+        first = executor.submit(first_adapter.count, "ext:py", r"C:\Work")
         assert first_waiting.wait(timeout=1)
-        second = executor.submit(adapter.count, "ext:txt", r"C:\Work")
+        second = executor.submit(second_adapter.count, "ext:txt", r"C:\Work")
         time.sleep(0.05)
         assert len(factory_calls) == 1
         release_first.set()

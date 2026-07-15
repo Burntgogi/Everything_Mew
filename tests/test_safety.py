@@ -78,6 +78,19 @@ SAFETY_MATRIX = (
     ("scoped filename with universal OR branch", "foo | *", r"C:\Work\project", True),
     ("universal regular expression", "regex:.*", None, True),
     ("quoted universal regular expression", 'regex:"^.*$"', None, True),
+    ("one-or-more universal regular expression", "regex:.+", None, True),
+    ("anchored one-or-more universal regular expression", "regex:^.+$", None, True),
+    ("nested path universal regular expression", "regex:path:.*", None, True),
+    ("nested modifiers universal regular expression", "case:regex:path:^.+$", None, True),
+    ("nested function universal regular expression", "regex:size:.+", None, True),
+    ("nested path universal wildcard", "wildcards:path:**", None, True),
+    ("nested modifiers universal wildcard", "case:wildcards:path:***", None, True),
+    ("legitimate filename regular expression", r"regex:^README.*\.md$", None, False),
+    ("legitimate scoped wildcard", r"wildcards:path:C:\Work\*.md", None, False),
+    ("greater-than size comparison", "size:>1mb", None, False),
+    ("greater-than-or-equal date comparison", "dm:>=2025-01-01", None, False),
+    ("less-than size comparison", "size:<1mb", None, False),
+    ("comparisons inside grouping", "<size:>1mb|size:<1mb> report", None, False),
     ("grouped universal OR branch", "<report|*> ext:md", None, True),
     ("grouped narrowing alternatives", "<report|summary> ext:md", None, False),
     ("OR alternatives share filename constraint", "report ext:md|ext:txt", None, False),
@@ -133,6 +146,17 @@ def test_content_policy_is_enforced_per_or_alternative() -> None:
         "<utf8content:needle ext:txt>|<report ext:md>",
         scope=r"C:\Work\project",
     ) is False
+
+
+@pytest.mark.parametrize(
+    "universal_filter",
+    ("regex:.+", "regex:path:.*", "regex:size:.+", "wildcards:path:**", "case:regex:path:^.+$"),
+)
+def test_universal_patterns_do_not_narrow_content_searches(universal_filter: str) -> None:
+    assert server.is_broad_query(
+        f"content:needle {universal_filter}",
+        scope=r"C:\Work\project",
+    ) is True
 
 
 @pytest.mark.parametrize(
