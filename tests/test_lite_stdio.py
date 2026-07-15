@@ -9,10 +9,14 @@ from typing import Any
 from typing import cast
 
 import pytest
-from pytest import MonkeyPatch
+from pytest import CaptureFixture, MonkeyPatch
 
 
-def request(method: str, params: dict[str, Any] | None = None, id_: int = 1) -> dict[str, Any]:
+def request(
+    method: str,
+    params: dict[str, Any] | None = None,
+    id_: str | int | float | None = 1,
+) -> dict[str, Any]:
     message: dict[str, Any] = {"jsonrpc": "2.0", "id": id_, "method": method}
     if params is not None:
         message["params"] = params
@@ -134,6 +138,44 @@ def test_lite_stdio_rejects_messages_without_exact_jsonrpc_version() -> None:
         }
 
 
+@pytest.mark.parametrize("request_id", ["request-1", 1, 1.5, None])
+def test_lite_stdio_accepts_string_number_and_null_request_ids(request_id: str | int | float | None) -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+
+    response = lite_stdio.handle_message(request("ping", id_=request_id), lite_stdio.LiteSession())
+
+    assert response == {"jsonrpc": "2.0", "id": request_id, "result": {}}
+
+
+@pytest.mark.parametrize(
+    "invalid_id",
+    [[1], {"nested": "id"}, True, float("nan"), float("inf"), float("-inf")],
+    ids=["list", "object", "bool", "nan", "positive-infinity", "negative-infinity"],
+)
+def test_lite_stdio_rejects_invalid_initialize_ids_without_advancing_session(invalid_id: object) -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = lite_stdio.LiteSession()
+    params = {"protocolVersion": "2025-11-25", "capabilities": {}}
+
+    response = lite_stdio.handle_message(
+        {"jsonrpc": "2.0", "id": invalid_id, "method": "initialize", "params": params},
+        session,
+    )
+
+    assert response == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32600, "message": "Invalid Request: id must be a string, number, or null."},
+    }
+    assert session.state is lite_stdio.SessionState.NEW
+
+    retry = lite_stdio.handle_message(request("initialize", params, id_="retry-1"), session)
+
+    assert retry["id"] == "retry-1"
+    assert retry["result"]["protocolVersion"] == "2025-11-25"
+    assert session.state is lite_stdio.SessionState.INITIALIZING
+
+
 def test_lite_stdio_allows_ping_before_initialize() -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
 
@@ -233,6 +275,37 @@ def test_lite_stdio_call_tool_returns_structured_content_for_dict(monkeypatch: M
     assert response["result"]["structuredContent"] == {"backend": "sdk-ipc"}
     assert json.loads(response["result"]["content"][0]["text"]) == {"backend": "sdk-ipc"}
     assert response["result"]["isError"] is False
+
+
+def test_lite_stdio_hides_unexpected_tool_exception_details(
+    monkeypatch: MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
+    sensitive_path = r"C:\Users\JMTFAM01\secrets\.env"
+    sensitive_token = "api-token-do-not-disclose"
+
+    def failing_call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError(f"failed at {sensitive_path}: {sensitive_token}")
+
+    monkeypatch.setattr(lite_stdio, "_call_tool", failing_call_tool)
+
+    response = lite_stdio.handle_message(
+        request("tools/call", {"name": "everything_status", "arguments": {}}, id_=8),
+        session,
+    )
+    serialized_response = json.dumps(response)
+    captured = capsys.readouterr()
+
+    assert response["result"] == {
+        "content": [{"type": "text", "text": "Tool execution failed."}],
+        "isError": True,
+    }
+    assert sensitive_path not in serialized_response
+    assert sensitive_token not in serialized_response
+    assert sensitive_path not in captured.out + captured.err
+    assert sensitive_token not in captured.out + captured.err
 
 
 @pytest.mark.parametrize(

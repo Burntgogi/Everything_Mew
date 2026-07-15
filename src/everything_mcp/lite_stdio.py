@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from importlib import import_module
+from math import isfinite
 from typing import Any, cast
 
 from .contracts import SortName
@@ -22,6 +23,7 @@ from .validation import ToolValidationError, validate_tool_arguments
 SERVER_NAME = "Everything_Mew_Lite"
 SERVER_VERSION = "0.1.0"
 JSONRPC_VERSION = "2.0"
+TOOL_EXECUTION_ERROR = "Tool execution failed."
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
 DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 SERVER_INSTRUCTIONS = (
@@ -48,6 +50,9 @@ def handle_message(message: dict[str, Any], session: LiteSession | None = None) 
     active_session = session if session is not None else LiteSession()
     request_id = message.get("id") if "id" in message else None
     is_notification = "id" not in message
+
+    if not is_notification and not _is_valid_request_id(request_id):
+        return _error(None, -32600, "Invalid Request: id must be a string, number, or null.")
 
     if message.get("jsonrpc") != JSONRPC_VERSION:
         return _error(request_id, -32600, "Invalid Request: jsonrpc must be exactly '2.0'.")
@@ -112,7 +117,8 @@ def _handle_line(line: str, session: LiteSession | None = None) -> dict[str, Any
     try:
         return handle_message(message, session)
     except Exception:  # pragma: no cover - defensive server boundary
-        request_id = message.get("id") if "id" in message else None
+        raw_request_id = message.get("id") if "id" in message else None
+        request_id = raw_request_id if _is_valid_request_id(raw_request_id) else None
         return _error(request_id, -32603, "Internal error.")
 
 
@@ -160,8 +166,8 @@ def _call_tool_result(params: dict[str, Any]) -> dict[str, Any]:
 
     try:
         payload = _call_tool(name, validated_arguments)
-    except Exception as exc:
-        return _tool_error(str(exc))
+    except Exception:
+        return _tool_error(TOOL_EXECUTION_ERROR)
     return _tool_success(payload)
 
 
@@ -189,6 +195,16 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> ToolPayload:
 def _server_tool(name: str) -> ToolFunc:
     server = import_module("everything_mcp.server")
     return cast(ToolFunc, getattr(server, name))
+
+
+def _is_valid_request_id(value: Any) -> bool:
+    if value is None or isinstance(value, str):
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    return isinstance(value, float) and isfinite(value)
 
 
 def _tool_success(payload: ToolPayload) -> dict[str, Any]:
