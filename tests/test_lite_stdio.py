@@ -3,8 +3,12 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from collections.abc import MutableMapping
+from dataclasses import FrozenInstanceError
 from typing import Any
+from typing import cast
 
+import pytest
 from pytest import MonkeyPatch
 
 
@@ -13,6 +17,30 @@ def request(method: str, params: dict[str, Any] | None = None, id_: int = 1) -> 
     if params is not None:
         message["params"] = params
     return message
+
+
+def initialized_session(lite_stdio: Any, protocol_version: str = "2025-11-25") -> Any:
+    session = lite_stdio.LiteSession()
+    response = lite_stdio.handle_message(
+        request(
+            "initialize",
+            {
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0"},
+            },
+        ),
+        session,
+    )
+    assert response["result"]["protocolVersion"] == protocol_version
+    assert (
+        lite_stdio.handle_message(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session,
+        )
+        is None
+    )
+    return session
 
 
 def test_lite_stdio_does_not_import_heavy_mcp_runtimes_on_load() -> None:
@@ -29,40 +57,141 @@ def test_lite_stdio_does_not_import_heavy_mcp_runtimes_on_load() -> None:
     assert "mcp" not in sys.modules
 
 
-def test_lite_stdio_initialize_advertises_tool_capability() -> None:
+def test_lite_stdio_tool_specs_are_shared_and_immutable() -> None:
+    tool_specs = importlib.import_module("everything_mcp.tool_specs")
+    search_spec = tool_specs.TOOL_SPEC_BY_NAME["everything_search"]
+
+    with pytest.raises(FrozenInstanceError):
+        setattr(search_spec, "name", "changed")
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, Any], search_spec.properties)["extra"] = object()
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, Any], tool_specs.TOOL_SPEC_BY_NAME)["extra"] = search_spec
+
+
+def test_lite_stdio_supports_current_and_previous_protocol_versions() -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
 
-    response = lite_stdio.handle_message(
-        request(
-            "initialize",
-            {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "test-client", "version": "0"},
-            },
+    assert lite_stdio.SUPPORTED_PROTOCOL_VERSIONS == ("2025-11-25", "2025-06-18")
+    for protocol_version in lite_stdio.SUPPORTED_PROTOCOL_VERSIONS:
+        session = lite_stdio.LiteSession()
+        response = lite_stdio.handle_message(
+            request(
+                "initialize",
+                {
+                    "protocolVersion": protocol_version,
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-client", "version": "0"},
+                },
+            ),
+            session,
         )
+
+        assert response == {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": protocol_version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "Everything_Mew_Lite", "version": "0.1.0"},
+                "instructions": (
+                    "Everything_Mew is a read-only Windows file and folder discovery server backed by Everything. "
+                    "Use everything_count before broad searches, add path/extension/date/size filters for large "
+                    "result sets, and use normal filesystem tools to read or modify files after locating paths."
+                ),
+            },
+        }
+
+
+def test_lite_stdio_selects_newest_version_when_client_requests_unsupported_version() -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = lite_stdio.LiteSession()
+
+    response = lite_stdio.handle_message(
+        request("initialize", {"protocolVersion": "2099-01-01", "capabilities": {}}),
+        session,
     )
 
-    assert response == {
+    assert response["result"]["protocolVersion"] == "2025-11-25"
+
+
+def test_lite_stdio_rejects_messages_without_exact_jsonrpc_version() -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+
+    for jsonrpc in (None, "1.0", 2.0):
+        message = request("ping")
+        if jsonrpc is None:
+            message.pop("jsonrpc")
+        else:
+            message["jsonrpc"] = jsonrpc
+
+        response = lite_stdio.handle_message(message, lite_stdio.LiteSession())
+
+        assert response == {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32600, "message": "Invalid Request: jsonrpc must be exactly '2.0'."},
+        }
+
+
+def test_lite_stdio_allows_ping_before_initialize() -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+
+    response = lite_stdio.handle_message(request("ping", id_=3), lite_stdio.LiteSession())
+
+    assert response == {"jsonrpc": "2.0", "id": 3, "result": {}}
+
+
+def test_lite_stdio_requires_initialize_then_initialized_notification() -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = lite_stdio.LiteSession()
+
+    before_initialize = lite_stdio.handle_message(request("tools/list", id_=2), session)
+    initialize_response = lite_stdio.handle_message(
+        request("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}}, id_=3),
+        session,
+    )
+    before_notification = lite_stdio.handle_message(request("tools/list", id_=4), session)
+    notification_response = lite_stdio.handle_message(
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        session,
+    )
+    after_notification = lite_stdio.handle_message(request("tools/list", id_=5), session)
+
+    assert before_initialize == {
         "jsonrpc": "2.0",
-        "id": 1,
-        "result": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "Everything_Mew_Lite", "version": "0.1.0"},
-            "instructions": (
-                "Everything_Mew is a read-only Windows file and folder discovery server backed by Everything. "
-                "Use everything_count before broad searches, add path/extension/date/size filters for large result "
-                "sets, and use normal filesystem tools to read or modify files after locating paths."
-            ),
-        },
+        "id": 2,
+        "error": {"code": -32002, "message": "Server not initialized."},
     }
+    assert initialize_response["result"]["protocolVersion"] == "2025-11-25"
+    assert before_notification == {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "error": {"code": -32002, "message": "Server initialization is not complete."},
+    }
+    assert notification_response is None
+    assert after_notification["result"]["tools"]
+
+
+def test_lite_stdio_does_not_accept_initialized_notification_before_initialize() -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = lite_stdio.LiteSession()
+
+    assert (
+        lite_stdio.handle_message(
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            session,
+        )
+        is None
+    )
+    assert lite_stdio.handle_message(request("tools/list"), session)["error"]["code"] == -32002
 
 
 def test_lite_stdio_tools_list_includes_everything_search_schema() -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
 
-    response = lite_stdio.handle_message(request("tools/list"))
+    response = lite_stdio.handle_message(request("tools/list"), session)
     tools = response["result"]["tools"]
     search = next(tool for tool in tools if tool["name"] == "everything_search")
 
@@ -74,19 +203,29 @@ def test_lite_stdio_tools_list_includes_everything_search_schema() -> None:
     }
     assert search["annotations"] == {"readOnlyHint": True, "destructiveHint": False}
     assert search["inputSchema"]["required"] == ["query"]
-    assert search["inputSchema"]["properties"]["sort"]["enum"] == ["name", "path", "size", "date_modified"]
+    assert search["inputSchema"]["additionalProperties"] is False
+    assert search["inputSchema"]["properties"]["sort"]["enum"] == [
+        "name",
+        "path",
+        "size",
+        "date_modified",
+    ]
 
 
 def test_lite_stdio_call_tool_returns_structured_content_for_dict(monkeypatch: MonkeyPatch) -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
 
     def fake_call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        assert name == "everything_status"
+        assert arguments == {}
         return {"backend": "sdk-ipc"}
 
     monkeypatch.setattr(lite_stdio, "_call_tool", fake_call_tool)
 
     response = lite_stdio.handle_message(
-        request("tools/call", {"name": "everything_status", "arguments": {}}, id_=7)
+        request("tools/call", {"name": "everything_status", "arguments": {}}, id_=7),
+        session,
     )
 
     assert response["jsonrpc"] == "2.0"
@@ -96,23 +235,70 @@ def test_lite_stdio_call_tool_returns_structured_content_for_dict(monkeypatch: M
     assert response["result"]["isError"] is False
 
 
-def test_lite_stdio_rejects_invalid_search_argument_type_without_importing_server() -> None:
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({}, "Missing required argument: query."),
+        ({"query": "ext:py", "extra": True}, "Unexpected argument: extra."),
+        ({"query": "ext:py", "sort": "newest"}, "sort must be one of: name, path, size, date_modified."),
+        ({"query": "ext:py", "metadata": "false"}, "metadata must be a boolean."),
+        ({"query": "ext:py", "limit": True}, "limit must be an integer."),
+        ({"query": "ext:py", "limit": 1.5}, "limit must be an integer."),
+        ({"query": "ext:py", "limit": 0}, "limit must be between 1 and 100."),
+        ({"query": "ext:py", "limit": 101}, "limit must be between 1 and 100."),
+    ],
+)
+def test_lite_stdio_validates_search_schema_before_importing_server(
+    arguments: dict[str, Any],
+    message: str,
+) -> None:
     sys.modules.pop("everything_mcp.server", None)
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
 
     response = lite_stdio.handle_message(
-        request("tools/call", {"name": "everything_search", "arguments": {"query": "ext:py", "metadata": "false"}})
+        request("tools/call", {"name": "everything_search", "arguments": arguments}),
+        session,
     )
 
     assert response["result"]["isError"] is True
-    assert response["result"]["content"][0]["text"] == "metadata must be a boolean."
+    assert response["result"]["content"][0]["text"] == message
     assert "everything_mcp.server" not in sys.modules
 
 
-def test_lite_stdio_unknown_method_returns_jsonrpc_error() -> None:
+def test_lite_stdio_validates_count_required_string_before_importing_server() -> None:
+    sys.modules.pop("everything_mcp.server", None)
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
 
-    response = lite_stdio.handle_message(request("resources/list", id_=9))
+    response = lite_stdio.handle_message(
+        request("tools/call", {"name": "everything_count", "arguments": {"query": 42}}),
+        session,
+    )
+
+    assert response["result"]["content"][0]["text"] == "query must be a string."
+    assert "everything_mcp.server" not in sys.modules
+
+
+def test_lite_stdio_rejects_unknown_tool_without_importing_server() -> None:
+    sys.modules.pop("everything_mcp.server", None)
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
+
+    response = lite_stdio.handle_message(
+        request("tools/call", {"name": "everything_delete", "arguments": {}}),
+        session,
+    )
+
+    assert response["result"]["content"][0]["text"] == "Unknown tool: everything_delete"
+    assert "everything_mcp.server" not in sys.modules
+
+
+def test_lite_stdio_unknown_method_returns_jsonrpc_error_after_initialization() -> None:
+    lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
+
+    response = lite_stdio.handle_message(request("resources/list", id_=9), session)
 
     assert response == {
         "jsonrpc": "2.0",
@@ -123,8 +309,12 @@ def test_lite_stdio_unknown_method_returns_jsonrpc_error() -> None:
 
 def test_lite_stdio_rejects_non_object_method_params() -> None:
     lite_stdio = importlib.import_module("everything_mcp.lite_stdio")
+    session = initialized_session(lite_stdio)
 
-    response = lite_stdio.handle_message({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": []})
+    response = lite_stdio.handle_message(
+        {"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": []},
+        session,
+    )
 
     assert response == {
         "jsonrpc": "2.0",
