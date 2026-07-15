@@ -3,12 +3,14 @@ import subprocess
 from pathlib import Path
 from typing import Any, TypedDict
 
+import pytest
 from pytest import MonkeyPatch
 
 es_cli = import_module("everything_mcp.adapters.es_cli")
 sdk_ipc = import_module("everything_mcp.adapters.sdk_ipc")
 config_module = import_module("everything_mcp.config")
 errors = import_module("everything_mcp.errors")
+server = import_module("everything_mcp.server")
 
 
 class SubprocessRunCall(TypedDict):
@@ -18,6 +20,69 @@ class SubprocessRunCall(TypedDict):
     text: bool
     shell: bool
     timeout: float
+
+
+class SafetyAdapter:
+    name = "fake"
+
+    def __init__(self) -> None:
+        self.count_calls: list[tuple[str, str | None]] = []
+        self.search_calls: list[tuple[str, str | None]] = []
+
+    def count(self, query: str, scope: str | None = None) -> int:
+        self.count_calls.append((query, scope))
+        return 1
+
+    def search(self, query: str, scope: str | None = None, **_: Any) -> list[object]:
+        self.search_calls.append((query, scope))
+        return []
+
+
+SAFETY_MATRIX = (
+    ("single exclusion", "!node_modules", None, True),
+    ("multiple exclusions", "!node_modules !.git", None, True),
+    ("drive root", "C:\\", None, True),
+    ("quoted drive root", r'"C:\"', None, True),
+    ("slash-normalized drive root", "C:/", None, True),
+    ("path drive root", "path:C:\\", None, True),
+    ("quoted path drive root", r'path:"C:\"', None, True),
+    ("drive root scope", "README.md", "C:\\", True),
+    ("UNC server root", r"\\server", None, True),
+    ("UNC share root", r"\\server\share", None, True),
+    ("quoted UNC share root", r'"\\server\share"', None, True),
+    ("path UNC share root", r"path:\\server\share", None, True),
+    ("quoted path UNC share root", r'path:"\\server\share"', None, True),
+    ("UNC share root scope", "README.md", r"\\server\share", True),
+    ("local project filename", "README.md", r"C:\\Work\\project", False),
+    ("UNC project filter", "ext:md", r"\\server\share\project", False),
+    ("unscoped positive filter", "report ext:md", None, False),
+)
+
+
+@pytest.mark.parametrize(("_name", "query", "scope", "expected_broad"), SAFETY_MATRIX)
+def test_broad_query_safety_matrix(_name: str, query: str, scope: str | None, expected_broad: bool) -> None:
+    assert server.is_broad_query(query, scope) is expected_broad
+
+
+@pytest.mark.parametrize(
+    ("_name", "query", "scope", "expected_broad"),
+    tuple(case for case in SAFETY_MATRIX if case[3]),
+)
+def test_rejected_safety_matrix_cases_do_not_call_adapters(
+    _name: str, query: str, scope: str | None, expected_broad: bool
+) -> None:
+    adapter = SafetyAdapter()
+
+    count = server.everything_count(query, scope=scope, adapter=adapter)
+    search = server.everything_search(query, scope=scope, adapter=adapter)
+
+    assert expected_broad is True
+    assert count["tooBroad"] is True
+    assert search["tooBroad"] is True
+    assert adapter.count_calls == []
+    assert adapter.search_calls == []
+    assert "exclusion" not in count["recommendation"]
+    assert "exclusion" not in search["recommendation"]
 
 
 def test_sdk_adapter_missing_dll_reports_status_without_crashing(tmp_path: Path) -> None:

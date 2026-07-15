@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 from pathlib import PureWindowsPath
 
-STRONG_FILTER_PATTERN = re.compile(r"(?:^|\s)(?:path:|ext:|dm:|dc:|rc:|size:|regex:|!)", re.IGNORECASE)
-PATH_SIGNAL_PATTERN = re.compile(r"(?:^|\s)(?:path:|[a-z]:[\\/])", re.IGNORECASE)
-DRIVE_ROOT_PATTERN = re.compile(r"^[a-z]:[\\/]?$", re.IGNORECASE)
+POSITIVE_FILTER_PATTERN = re.compile(r"(?:^|\s)(?:path:|ext:|dm:|dc:|rc:|size:|regex:)", re.IGNORECASE)
+EXCLUSION_PATTERN = re.compile(r"(?:^|\s)!\S")
+QUERY_TERM_PATTERN = re.compile(r'(?:^|\s)(path:"(?:[^"]|"")*"|\S+)', re.IGNORECASE)
+DRIVE_ROOT_PATTERN = re.compile(r"^[a-z]:[\\/]*$", re.IGNORECASE)
+UNC_ROOT_PATTERN = re.compile(r"^[\\/]{2}[^\\/]+(?:[\\/]+[^\\/]+)?[\\/]*$")
 
 
 def compose_query(query: str, scope: str | None = None) -> str:
@@ -35,12 +37,61 @@ def normalize_scope(scope: str) -> str:
 def is_drive_root(value: str | None) -> bool:
     if value is None:
         return False
-    return bool(DRIVE_ROOT_PATTERN.match(normalize_scope(value)))
+    return bool(DRIVE_ROOT_PATTERN.match(_unquote_path(value)))
+
+
+def is_unc_root(value: str | None) -> bool:
+    if value is None:
+        return False
+    return bool(UNC_ROOT_PATTERN.match(_unquote_path(value)))
+
+
+def is_root_scope(value: str | None) -> bool:
+    return is_drive_root(value) or is_unc_root(value)
+
+
+def has_root_path_expression(query: str) -> bool:
+    for term in _query_terms(query):
+        value = term[5:] if term.lower().startswith("path:") else term
+        if is_root_scope(value):
+            return True
+    return False
+
+
+def has_positive_narrowing_filter(query: str) -> bool:
+    return bool(POSITIVE_FILTER_PATTERN.search(query))
+
+
+def has_exclusion(query: str) -> bool:
+    return bool(EXCLUSION_PATTERN.search(query))
+
+
+def is_exclusion_only_query(query: str) -> bool:
+    terms = _query_terms(query)
+    return bool(terms) and has_exclusion(query) and all(term.startswith("!") for term in terms)
 
 
 def has_strong_filter(query: str) -> bool:
-    return bool(STRONG_FILTER_PATTERN.search(query))
+    """Compatibility name for positive narrowing filters only."""
+    return has_positive_narrowing_filter(query)
 
 
 def has_path_signal(query: str) -> bool:
-    return bool(PATH_SIGNAL_PATTERN.search(query))
+    for term in _query_terms(query):
+        if term.lower().startswith("path:"):
+            return True
+        value = _unquote_path(term)
+        if re.match(r"(?:[a-z]:[\\/]|[\\/]{2})", value, re.IGNORECASE):
+            return True
+    return False
+
+
+def _query_terms(query: str) -> tuple[str, ...]:
+    return tuple(match.group(1) for match in QUERY_TERM_PATTERN.finditer(query))
+
+
+def _unquote_path(value: str) -> str:
+    text = value.strip()
+    if len(text) >= 2 and text.startswith('"') and text.endswith('"'):
+        return text[1:-1].replace('""', '"')
+    return text
