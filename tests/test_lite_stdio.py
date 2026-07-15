@@ -35,6 +35,17 @@ def valid_initialize_params(protocol_version: str = "2025-11-25") -> dict[str, A
     }
 
 
+def markdown_json_objects(path: Path) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    for section in path.read_text(encoding="utf-8").split("```json")[1:]:
+        block, closing_fence, _ = section.partition("```")
+        assert closing_fence
+        document = json.loads(block)
+        assert isinstance(document, dict)
+        documents.append(cast(dict[str, Any], document))
+    return documents
+
+
 def initialized_session(lite_stdio: Any, protocol_version: str = "2025-11-25") -> Any:
     session = lite_stdio.LiteSession()
     response = lite_stdio.handle_message(
@@ -106,13 +117,20 @@ def test_release_manifest_and_ci_cover_public_sdist_and_fastmcp() -> None:
     included_paths = cast(list[str], sdist_config["include"])
 
     assert "/docs" not in included_paths
-    assert "/docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md" in included_paths
+    assert {path for path in included_paths if path.startswith("/docs/")} == {
+        "/docs/AGENT_INSTALLATION_GUIDE.md",
+        "/docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md",
+    }
+    assert {path for path in included_paths if path.startswith("/scripts/")} == {
+        "/scripts/measure_lite_sessions.ps1"
+    }
     assert "/tests" in included_paths
+    assert all(not path.startswith("/.github") for path in included_paths)
     assert all("SDK_DESIGN_REVIEW" not in path for path in included_paths)
 
     workflow_path = repository_root / ".github/workflows/ci.yml"
     if not workflow_path.is_file():
-        pytest.skip("Repository CI workflow is intentionally excluded from the source distribution.")
+        return
 
     workflow = workflow_path.read_text(encoding="utf-8")
     assert 'python -m pip install -e ".[dev,server]"' in workflow
@@ -127,16 +145,40 @@ def test_release_manifest_and_ci_cover_public_sdist_and_fastmcp() -> None:
         assert tool_name in workflow
 
 
-def test_opencode_examples_use_host_environment_substitution() -> None:
+def test_opencode_mcp_examples_follow_official_local_schema() -> None:
     repository_root = Path(__file__).resolve().parents[1]
     config = cast(
         dict[str, Any],
         json.loads((repository_root / "opencode.example.json").read_text(encoding="utf-8")),
     )
-    environment = config["mcp"]["everything-mew"]["environment"]
-    assert environment["EVERYTHING_SDK_DLL"] == "{env:EVERYTHING_SDK_DLL}"
+    agent_guide_examples = [
+        document
+        for document in markdown_json_objects(repository_root / "docs/AGENT_INSTALLATION_GUIDE.md")
+        if "mcp" in document
+    ]
+    examples = [config, *agent_guide_examples]
+    allowed_keys = {"type", "command", "cwd", "environment", "enabled", "timeout"}
+    required_keys = {"type", "command"}
 
-    for relative_path in ("README.md", "README.ko.md", "docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md"):
+    assert len(examples) == 2
+    for example in examples:
+        mcp = cast(dict[str, Any], example["mcp"])
+        local_config = cast(dict[str, Any], mcp["everything-mew"])
+        assert required_keys <= local_config.keys()
+        assert local_config.keys() <= allowed_keys
+        assert local_config["type"] == "local"
+        command = local_config["command"]
+        assert isinstance(command, list)
+        assert command and all(isinstance(argument, str) for argument in command)
+        environment = cast(dict[str, Any], local_config["environment"])
+        assert environment["EVERYTHING_SDK_DLL"] == "{env:EVERYTHING_SDK_DLL}"
+
+    for relative_path in (
+        "README.md",
+        "README.ko.md",
+        "docs/AGENT_INSTALLATION_GUIDE.md",
+        "docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md",
+    ):
         source = (repository_root / relative_path).read_text(encoding="utf-8")
         sdk_environment_lines = [line for line in source.splitlines() if '"EVERYTHING_SDK_DLL"' in line]
         assert sdk_environment_lines
@@ -155,6 +197,32 @@ def test_sdk_guide_selects_dll_from_python_pointer_width_without_overwrite() -> 
     assert 'Join-Path $destDir $dllName' in source
     assert "Copy-Item -LiteralPath $source -Destination $dest" in source
     assert "Refusing to overwrite existing SDK DLL" in source
+
+
+def test_agent_guide_reuses_pointer_width_selected_dll_without_overwrite() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    source = (repository_root / "docs/AGENT_INSTALLATION_GUIDE.md").read_text(encoding="utf-8")
+    powershell = "\n".join(
+        section.partition("```")[0]
+        for section in source.split("```powershell")[1:]
+    )
+
+    assert "%USERPROFILE%" not in source
+    assert r"C:\Users\<you>" not in source
+    assert "struct.calcsize('P') * 8" in source
+    assert '$dllName = "Everything64.dll"' in source
+    assert '$dllName = "Everything32.dll"' in source
+    assert 'Join-Path $sdkRoot "dll\\$dllName"' in source
+    assert "Join-Path $destDir $dllName" in source
+    assert "Copy-Item -LiteralPath $source -Destination $dest" in source
+    assert "Refusing to overwrite existing SDK DLL" in source
+    assert '$env:EVERYTHING_SDK_DLL = $dest.Replace("\\", "/")' in source
+    assert "Test-Path -LiteralPath $dest -PathType Leaf" in source
+    assert all(
+        line.strip() == '"64" { $dllName = "Everything64.dll" }'
+        for line in powershell.splitlines()
+        if "Everything64.dll" in line
+    )
 
 
 def test_lite_stdio_does_not_import_heavy_mcp_runtimes_on_load() -> None:

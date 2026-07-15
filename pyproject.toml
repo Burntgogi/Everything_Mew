@@ -42,9 +42,11 @@ include = [
     "/README.md",
     "/README.ko.md",
     "/SECURITY.md",
+    "/docs/AGENT_INSTALLATION_GUIDE.md",
     "/docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md",
     "/opencode.example.json",
     "/pyproject.toml",
+    "/scripts/measure_lite_sessions.ps1",
     "/src",
     "/tests",
 ]
