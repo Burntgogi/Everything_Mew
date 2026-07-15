@@ -19,11 +19,15 @@ from everything_mcp.contracts import AdapterStatus, SearchHit, SortName
 from everything_mcp.errors import BackendUnavailableError, QueryError
 from everything_mcp.query import compose_query
 
+EVERYTHING_SORT_NAME_ASCENDING = 1
+EVERYTHING_SORT_PATH_ASCENDING = 3
+EVERYTHING_SORT_SIZE_ASCENDING = 5
+EVERYTHING_SORT_DATE_MODIFIED_ASCENDING = 13
 SORT_FLAGS: dict[str, int] = {
-    "name": 1,
-    "path": 3,
-    "size": 5,
-    "date_modified": 11,
+    "name": EVERYTHING_SORT_NAME_ASCENDING,
+    "path": EVERYTHING_SORT_PATH_ASCENDING,
+    "size": EVERYTHING_SORT_SIZE_ASCENDING,
+    "date_modified": EVERYTHING_SORT_DATE_MODIFIED_ASCENDING,
 }
 REQUEST_FILE_NAME = 0x00000001
 REQUEST_PATH = 0x00000002
