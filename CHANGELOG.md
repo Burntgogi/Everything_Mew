@@ -2,15 +2,16 @@
 
 All notable release changes are documented here. / 주요 릴리스 변경 사항을 이 문서에 기록합니다.
 
-## [0.2.0-rc.1] - 2026-07-17
+## [0.2.0] - 2026-07-17
 
-The release-candidate package version is `0.2.0rc1` and its Git tag is
-`v0.2.0-rc.1`. After candidate review, the final package and tag will be
-`0.2.0` and `v0.2.0`.
+The final package version is `0.2.0` and its Git tag is `v0.2.0`. It was
+promoted after the `v0.2.0-rc.1` candidate passed code review, local and CI
+verification, archive inspection, installed-wheel smoke tests, and live SDK
+E2E validation.
 
-릴리스 후보 패키지 버전은 `0.2.0rc1`이고 Git 태그는
-`v0.2.0-rc.1`입니다. 후보 검토 후 최종 패키지 `0.2.0`과 태그
-`v0.2.0`으로 승격합니다.
+최종 패키지 버전은 `0.2.0`이고 Git 태그는 `v0.2.0`입니다.
+`v0.2.0-rc.1` 후보가 코드 리뷰, 로컬·CI 검증, 아카이브 검사, 설치 wheel
+스모크 테스트, 실제 SDK E2E를 통과한 뒤 승격했습니다.
 
 ### English
 
@@ -136,5 +137,6 @@ Baseline commit: `ffa5eaebaad5524c0bb35a90cf983e66cb9b452d`.
 - Everything SDK 설치, 읽기 전용 경계, 경로 우선 후보 탐색 흐름을
   문서화했습니다.
 
+[0.2.0]: https://github.com/Burntgogi/Everything_Mew/compare/v0.1.0...v0.2.0
 [0.2.0-rc.1]: https://github.com/Burntgogi/Everything_Mew/compare/v0.1.0...v0.2.0-rc.1
 [0.1.0]: https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.1.0

@@ -27,9 +27,8 @@ submitting the report.
 
 | Release | Status |
 | --- | --- |
+| `0.2.x` | Current supported / 현재 지원 |
 | `0.1.x` | Supported baseline / 지원 기준판 |
-| `0.2.0rc1` | Prerelease testing / 시험 배포 |
-| Planned `0.2.0` | Not yet released / 미배포 |
 
 Everything_Mew supports CPython 3.11 through 3.14 on Windows. Reports against
 unsupported Python versions or non-Windows hosts may still be useful, but they

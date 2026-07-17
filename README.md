@@ -34,16 +34,17 @@ Everything_Mew is for candidate discovery, not code understanding, duplicate cle
 | Release line | Role | Package version | Git tag |
 | --- | --- | --- | --- |
 | 0.1 | Original FastMCP-based baseline | `0.1.0` | `v0.1.0` |
-| 0.2 | Current release candidate | `0.2.0rc1` | `v0.2.0-rc.1` |
+| 0.2 | Current stable release | `0.2.0` | `v0.2.0` |
 
 The `0.1.0` baseline is commit `ffa5eaebaad5524c0bb35a90cf983e66cb9b452d`.
-The 0.2 line is a prerelease candidate; it has not been promoted to final `0.2.0`.
-See the bilingual release notes for [v0.1.0](docs/releases/v0.1.0.md) and
+The 0.2 line is the current stable release. See the bilingual release notes for
+[v0.1.0](docs/releases/v0.1.0.md) and [v0.2.0](docs/releases/v0.2.0.md). The
+reviewed candidate remains documented as
 [v0.2.0-rc.1](docs/releases/v0.2.0-rc.1.md).
 
 ## Update notes
 
-### 0.2.0 release candidate: low-standby MCP mode
+### 0.2.0: low-standby MCP mode
 
 This update adds a low-standby stdio MCP path for Codex Desktop and other MCP
 hosts that keep one server process alive per active session.
@@ -92,17 +93,16 @@ hosts that keep one server process alive per active session.
 - ES metadata CSV is decoded explicitly as UTF-8, and SDK result paths use the
   official required-length query before an exact-size copy.
 
-The release-candidate package version is `0.2.0rc1`; its Git tag is
-`v0.2.0-rc.1`. The final release will use package version `0.2.0` and tag
-`v0.2.0` after the release gates pass. See the bilingual
-[changelog](CHANGELOG.md).
+The final package version is `0.2.0` and its Git tag is `v0.2.0`. It was
+promoted after the `v0.2.0-rc.1` candidate passed the release gates. See the
+bilingual [changelog](CHANGELOG.md).
 
 Recommended adoption:
 
 - Use `everything-mew-lite` for Codex Desktop or always-enabled local MCP hosts.
 - Keep `everything-mew` for hosts that already work well with FastMCP or require the existing FastMCP runtime behavior.
 
-Upgrade from 0.1.0 after checking out the candidate source or release tag:
+Upgrade from 0.1.0 after checking out the source or final release tag:
 
 ```powershell
 py -m pip install --upgrade .
