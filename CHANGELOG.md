@@ -20,6 +20,9 @@ The release-candidate package version is `0.2.0rc1` and its Git tag is
   structurally parsed `pyproject.toml` fallback for source checkouts.
 - Add Windows CI for Python 3.11 and 3.14 covering pytest, Ruff, strict mypy,
   wheel and source builds, and an installed-wheel lite stdio smoke test.
+- Normalize repository text to LF with `.gitattributes`, preventing Windows
+  `core.autocrlf` settings from changing wheel and sdist bytes between clean
+  checkouts of the same commit.
 - Clarify that Python distributions contain the MCP runtime only; the agent
   skill must be installed explicitly from the repository or a plugin.
 - Add security reporting, contribution, SDK environment, and reproducible
@@ -65,6 +68,9 @@ The release-candidate package version is `0.2.0rc1` and its Git tag is
   `pyproject.toml`을 구조적으로 파싱해 대체 값을 읽습니다.
 - Python 3.11과 3.14 Windows CI에서 pytest, Ruff, strict mypy, wheel/sdist
   빌드, 설치된 wheel의 lite stdio 스모크 테스트를 실행합니다.
+- `.gitattributes`로 저장소 텍스트를 LF로 고정해 Windows의
+  `core.autocrlf` 설정이 같은 커밋의 깨끗한 체크아웃 사이에서 wheel과 sdist
+  바이트를 바꾸지 않도록 했습니다.
 - Python 배포 파일에는 MCP 런타임만 포함되며, 에이전트 스킬은 저장소 또는
   플러그인에서 명시적으로 설치해야 함을 분명히 합니다.
 - 보안 신고, 기여, SDK 환경 변수, 재현 가능한 릴리스 절차를 문서화합니다.

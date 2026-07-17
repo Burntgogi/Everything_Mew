@@ -42,6 +42,7 @@ packages = ["src/everything_mcp"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+    "/.gitattributes",
     "/CHANGELOG.md",
     "/CONTRIBUTING.md",
     "/LICENSE",

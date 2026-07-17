@@ -61,6 +61,9 @@ hosts that keep one server process alive per active session.
 - The package top-level import now lazy-loads the FastMCP server module.
 - The server version comes from installed package metadata, with a structural `pyproject.toml` fallback in source checkouts.
 - Windows CI verifies Python 3.11 and 3.14, strict typing, both distribution formats, and the installed-wheel lite handshake.
+- `.gitattributes` fixes repository text at LF so clean Windows checkouts of the
+  same commit produce byte-stable wheel and sdist inputs despite
+  `core.autocrlf` settings.
 - Contract and safety tests were expanded around lite stdio behavior, read-only tool metadata, adapter selection, broad-query safety, and syntax validation.
 - Broad-query validation now parses quoted terms, negation, `< >` groups, and
   every `|` alternative; malformed or universal alternatives fail closed.

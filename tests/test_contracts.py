@@ -51,7 +51,12 @@ def test_release_candidate_metadata_and_notes_are_consistent() -> None:
         pyproject = tomllib.load(pyproject_file)
 
     assert pyproject["project"]["version"] == "0.2.0rc1"
-    assert "/docs/releases/*.md" in pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+    sdist_includes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+    assert "/.gitattributes" in sdist_includes
+    assert "/docs/releases/*.md" in sdist_includes
+
+    attributes = (root / ".gitattributes").read_text(encoding="utf-8")
+    assert "* text=auto eol=lf" in attributes
 
     expected_release_references = {
         "README.md": ("v0.1.0", "v0.2.0-rc.1"),
