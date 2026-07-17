@@ -13,8 +13,26 @@ def test_all_four_read_only_tools_are_declared() -> None:
 def test_syntax_help_topic_and_default() -> None:
     assert "ext:md" in server.everything_syntax_help("extension")
     default = server.everything_syntax_help()
-    assert "path:" in default
+    assert "Everything 1.4.1" in default
+    assert '"C:\\Work\\project\\"' in default
     assert "!node_modules" in default
+
+
+def test_syntax_help_is_version_aware_and_explains_operators_and_slow_io() -> None:
+    compatibility = server.everything_syntax_help("compatibility")
+    operators = server.everything_syntax_help("operators")
+    regex = server.everything_syntax_help("regex")
+    content = server.everything_syntax_help("content")
+
+    assert "Everything 1.4.1" in compatibility
+    assert "Everything 1.5" in compatibility
+    assert "OR" in operators and "higher precedence" in operators
+    assert 'regex:"gr(a|e)y"' in regex
+    assert "quote" in regex.lower()
+    assert "from-disk:" in content
+    assert "content*:" in content
+    assert "nested" in content.lower()
+    assert "separate indexed" in content
 
 
 def test_mcp_wrappers_do_not_expose_adapter_parameter() -> None:

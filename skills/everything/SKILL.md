@@ -1,12 +1,18 @@
 ---
-name: everything
-compatibility: opencode
+name: everything-mew
 description: Use when locating files or folders by name, path, extension, date, size, attributes, or other Everything-indexed Windows filesystem metadata.
 ---
 
 # Everything
 
 Use this skill when a user needs to find candidate files or folders on Windows by metadata that Everything indexes. Everything is a fast path discovery layer, not a file reader, code search engine, cleanup tool, or project mapper.
+
+## Supported syntax profile
+
+- Treat Everything 1.4.1 core syntax as the default compatibility profile.
+- Call `everything_status` before using a feature documented only for Everything 1.5.
+- The SDK transports the query string; Everything itself interprets the search syntax.
+- Do not copy the current 1.5 Search Syntax, Search Modifiers, or Search Functions manuals wholesale into a 1.4 query.
 
 ## Use Everything for
 
@@ -31,7 +37,7 @@ Use this skill when a user needs to find candidate files or folders on Windows b
 ## Default workflow
 
 1. Decide whether the task is metadata discovery. If it is content or code understanding, use `read`, `grep`, `ast-grep`, or LSP instead.
-2. Build a scoped Everything query. Prefer a known project path, extension, date, size, and noisy-directory exclusions.
+2. Build a scoped Everything query. Pass a known absolute project directory through the `scope` argument, then add extension, date, size, and noisy-directory exclusions.
 3. Count before broad search. If the query is broad, ambiguous, or unscoped, call `everything_count` first.
 4. Refine until the result size is useful.
 5. Call `everything_search` with path-first output and `metadata=false` unless metadata is required.
@@ -45,12 +51,15 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP
 
 ## Query rules
 
-- Scope to a known root, for example `C:\Work\project\ ext:md`.
+- Pass an absolute recursive scope, for example `scope="C:\Work\project"`. The server composes the 1.4-compatible boundary `"C:\Work\project\"`.
+- Do not use `path:"C:\Work\project"` as a directory boundary. `path:` performs a partial match on the full path and can also match `C:\Work\project-backup`.
 - Exclude noisy folders when useful: `!node_modules !.git !dist !build !.venv !__pycache__ !reports`.
 - Use `ext:` for extension filtering, for example `ext:json;yml;yaml`.
 - Use `dm:` or `dc:` for modified or created dates.
 - Use `file:` or `folder:` when the object type matters.
 - Use exact quotes for literal paths or phrases.
+- Use space for AND, `|` for OR, `!` for NOT, and `< >` for grouping. Everything evaluates OR before AND by default.
+- Quote regular expressions containing operators or spaces, for example `regex:"gr(a|e)y" ext:txt`.
 - Use `everything_syntax_help` when syntax is uncertain.
 
 ## Result limits
@@ -63,9 +72,9 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP
 
 ## Content hand-off
 
-Everything has `content:`, but file contents are not indexed and content search is slow. Avoid `content:` by default.
+Everything has content functions, but file contents are not indexed and content search is slow. Avoid content search by default.
 
-Only use `content:` when heavily scoped with strong filters such as path, extension, date, or file type. Prefer this pattern instead:
+The 1.4 content functions and known 1.5 aliases such as `ansi-content:`, `ascii-content:`, `binary-content:`, `byte-stream-content:`, ADS content functions, and `from-disk:` require both a non-root scope and a separate indexed filter. The same rule applies to literal-tail forms such as `content*:` and nested modifier chains such as `binary:content:` or `dot-all:regex:content:`. Prefer this pattern instead:
 
 ```text
 Everything: C:\Work\project\ ext:py;md dm:thismonth

@@ -9,6 +9,7 @@ from .adapters import EverythingAdapter, select_adapter
 from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, SearchBatch, SortName, clamp_limit, path_first_items
 from .errors import BackendUnavailableError, EverythingMcpError
 from .query import (
+    is_path_within_scope,
     is_safe_query,
 )
 from .syntax import syntax_help
@@ -74,6 +75,8 @@ def everything_search(
     else:
         hits = search_result
         notes = ()
+    if scope:
+        hits = [hit for hit in hits if is_path_within_scope(hit.path, scope)]
     truncated = len(hits) > safe_limit
     visible = hits[:safe_limit]
     result: dict[str, Any] = {

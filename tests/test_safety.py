@@ -12,6 +12,7 @@ config_module = import_module("everything_mcp.config")
 errors = import_module("everything_mcp.errors")
 query_module = import_module("everything_mcp.query")
 server = import_module("everything_mcp.server")
+SearchHit = import_module("everything_mcp.contracts").SearchHit
 
 
 class SubprocessRunCall(TypedDict):
@@ -66,6 +67,8 @@ SAFETY_MATRIX = (
     ("path UNC share root", r"path:\\server\share", None, True),
     ("quoted path UNC share root", r'path:"\\server\share"', None, True),
     ("UNC share root scope", "README.md", r"\\server\share", True),
+    ("relative scope", "README.md", r"Work\project", True),
+    ("drive-relative scope", "README.md", r"C:Work\project", True),
     ("local project filename", "README.md", r"C:\\Work\\project", False),
     ("UNC project filter", "ext:md", r"\\server\share\project", False),
     ("unscoped positive filter", "report ext:md", None, False),
@@ -144,8 +147,82 @@ def test_regex_is_not_reported_as_a_positive_indexed_filter() -> None:
 
 
 @pytest.mark.parametrize(
+    ("scope", "expected"),
+    (
+        (r"C:\Work", '"C:\\Work\\" ext:md'),
+        ("C:\\Program Files\\", '"C:\\Program Files\\" ext:md'),
+        ("C:/Work/project/", '"C:\\Work\\project\\" ext:md'),
+        (r"\\server\share\project", '"\\\\server\\share\\project\\" ext:md'),
+    ),
+)
+def test_scope_composition_uses_an_exact_recursive_folder_boundary(scope: str, expected: str) -> None:
+    assert query_module.compose_query("ext:md", scope) == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "scope", "expected"),
+    (
+        (r"C:\Work\project\README.md", r"C:\Work\project", True),
+        (r"c:\work\PROJECT\src\main.py", r"C:\Work\project", True),
+        (r"C:\Work\project-backup\README.md", r"C:\Work\project", False),
+        (r"\\server\share\project\README.md", r"\\server\share\project", True),
+        (r"\\server\share\project-old\README.md", r"\\server\share\project", False),
+    ),
+)
+def test_path_scope_boundary_is_case_insensitive_and_rejects_prefix_siblings(
+    path: str, scope: str, expected: bool
+) -> None:
+    assert query_module.is_path_within_scope(path, scope) is expected
+
+
+def test_search_discards_adapter_hits_outside_scope_before_serializing() -> None:
+    class PrefixSiblingAdapter(SafetyAdapter):
+        def search(self, query: str, scope: str | None = None, **_: Any) -> list[object]:
+            self.search_calls.append((query, scope))
+            return [
+                SearchHit(path=r"C:\Users\name\.config\opencode-backups\Everything64.dll"),
+                SearchHit(path=r"C:\Users\name\.config\opencode\Everything64.dll"),
+            ]
+
+    result = server.everything_search(
+        "Everything64.dll ext:dll",
+        scope=r"C:\Users\name\.config\opencode",
+        adapter=PrefixSiblingAdapter(),
+    )
+
+    assert result["items"] == [r"C:\Users\name\.config\opencode\Everything64.dll"]
+
+
+@pytest.mark.parametrize(
     "content_function",
-    ("content", "ansicontent", "utf8content", "utf16content", "utf16becontent"),
+    (
+        "content",
+        "ansicontent",
+        "ansi-content",
+        "contenta",
+        "ascii-content",
+        "binary-content",
+        "byte-stream-content",
+        "octet-stream-content",
+        "utf8content",
+        "utf-8-content",
+        "utf16content",
+        "utf-16-content",
+        "utf16becontent",
+        "utf-16be-content",
+        "alternate-data-stream-ansi",
+        "ads-ansi",
+        "alternate-data-stream-hex",
+        "ads-hex",
+        "alternate-data-stream-text-plain",
+        "ads-text-plain",
+        "alternate-data-stream-utf16",
+        "ads-utf16",
+        "alternate-data-stream-utf16be",
+        "ads-utf16be",
+        "alternate-data-stream-utf8",
+        "ads-utf8",
+    ),
 )
 def test_every_content_alias_requires_non_root_scope_and_filter(content_function: str) -> None:
     query = f"{content_function}:needle"
@@ -153,6 +230,54 @@ def test_every_content_alias_requires_non_root_scope_and_filter(content_function
     assert server.is_broad_query(query, scope=r"C:\Work\project") is True
     assert server.is_broad_query(f"{query} ext:md", scope=r"C:\Work\project") is False
     assert server.is_broad_query(f"{query} ext:md", scope="C:\\") is True
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "content*:needle",
+        r"binary:content:\x00",
+        "hex:content:4142",
+        "each-line:content:needle",
+        'dot-all:regex:content:"^a.*b$"',
+        "wildcards:content*:needle*",
+    ),
+)
+def test_nested_and_literal_content_forms_cannot_bypass_slow_io_policy(query: str) -> None:
+    assert server.is_broad_query(query, scope=r"C:\Work\project") is True
+    assert server.is_broad_query(f"{query} ext:txt", scope=r"C:\Work\project") is False
+
+
+def test_literal_regex_modifier_still_requires_a_separate_indexed_filter() -> None:
+    assert server.is_broad_query("regex*:needle", scope=r"C:\Work\project") is True
+    assert server.is_broad_query("regex*:needle ext:txt", scope=r"C:\Work\project") is False
+
+
+@pytest.mark.parametrize(
+    "modifier",
+    ("from-disk", "fromdisk", "?from-disk", "no-highlight:from-disk"),
+)
+def test_forced_disk_modifier_requires_non_root_scope_and_separate_filter(modifier: str) -> None:
+    query = f"{modifier}:length:>5m"
+
+    assert server.is_broad_query(query, scope=r"C:\Work\project") is True
+    assert server.is_broad_query(f"{query} ext:md", scope=r"C:\Work\project") is False
+    assert server.is_broad_query(f"{query} ext:md", scope="C:\\") is True
+
+
+def test_function_chain_detection_does_not_treat_a_content_folder_as_content_search() -> None:
+    assert server.is_broad_query(r"path:C:\content:folder") is False
+
+
+def test_slow_io_policy_is_enforced_per_or_alternative() -> None:
+    assert server.is_broad_query(
+        "<ansi-content:needle>|<report ext:md>",
+        scope=r"C:\Work\project",
+    ) is True
+    assert server.is_broad_query(
+        "<ansi-content:needle ext:txt>|<from-disk:length:>5m ext:md>",
+        scope=r"C:\Work\project",
+    ) is False
 
 
 def test_content_policy_is_enforced_per_or_alternative() -> None:
@@ -251,7 +376,7 @@ def test_es_cli_uses_subprocess_without_shell(monkeypatch: MonkeyPatch) -> None:
     assert calls[0]["shell"] is False
     assert calls[0]["timeout"] == es_cli.DEFAULT_ES_TIMEOUT_SECONDS
     assert calls[0]["args"][0] == r"C:\Tools\es.exe"
-    assert calls[0]["args"][-1] == 'path:"C:\\Work" ext:md'
+    assert calls[0]["args"][-1] == '"C:\\Work\\" ext:md'
 
 
 def test_es_cli_bad_count_raises_actionable_query_error(monkeypatch: MonkeyPatch) -> None:
@@ -308,7 +433,7 @@ def test_es_cli_timeout_raises_query_error(monkeypatch: MonkeyPatch) -> None:
 def test_es_cli_spaced_scope_is_quoted() -> None:
     adapter = es_cli.EsCliAdapter(Path(r"C:\Tools\es.exe"))
 
-    assert adapter._compose_query("ext:exe", r"C:\Program Files") == 'path:"C:\\Program Files" ext:exe'
+    assert adapter._compose_query("ext:exe", r"C:\Program Files") == '"C:\\Program Files\\" ext:exe'
 
 
 def test_sdk_adapter_configures_ctypes_signatures() -> None:

@@ -29,9 +29,21 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP on selected path
 
 Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 정리, 저장공간 관리를 위한 도구가 아닙니다.
 
+## 릴리스 상태
+
+| 릴리스 계열 | 역할 | 패키지 버전 | Git 태그 |
+| --- | --- | --- | --- |
+| 0.1 | 기존 FastMCP 기반 기준판 | `0.1.0` | `v0.1.0` |
+| 0.2 | 현재 릴리스 후보 | `0.2.0rc1` | `v0.2.0-rc.1` |
+
+`0.1.0` 기준판은 커밋 `ffa5eaebaad5524c0bb35a90cf983e66cb9b452d`입니다.
+0.2 계열은 시험 배포 후보이며 아직 최종 `0.2.0`으로 승격하지 않았습니다.
+한영 릴리스 노트는 [v0.1.0](docs/releases/v0.1.0.md)과
+[v0.2.0-rc.1](docs/releases/v0.2.0-rc.1.md)을 참조하세요.
+
 ## 업데이트 노트
 
-### 0.2.0 예정(미배포): 낮은 대기 메모리 MCP 모드
+### 0.2.0 릴리스 후보: 낮은 대기 메모리 MCP 모드
 
 이번 업데이트는 Codex Desktop처럼 활성 세션마다 서버 프로세스를 유지하는 MCP
 호스트를 위해 낮은 대기 메모리용 stdio MCP 경로를 추가합니다.
@@ -52,9 +64,14 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 - lite stdio 동작, 읽기 전용 도구 메타데이터, 어댑터 선택, 광범위 쿼리 안전장치, 문법 검증에 대한 계약/안전 테스트를 보강했습니다.
 - 광범위 쿼리 검증은 인용된 항목, 부정, `< >` 그룹, 모든 `|` 대안을
   파싱하며, 잘못된 문법이나 전체 일치 대안은 실패 폐쇄 방식으로 거부합니다.
-- Everything의 모든 콘텐츠 함수(`content:`, `ansicontent:`,
-  `utf8content:`, `utf16content:`, `utf16becontent:`)는 가능한 각 분기에서
-  루트가 아닌 범위와 추가 인덱스 축소 필터를 요구합니다.
+- 절대 scope는 끝에 `\`가 있는 인용된 재귀 폴더 검색어로 합성하고, 반환
+  경로를 직렬화하기 전에 정규화된 경계를 다시 검사합니다.
+  `C:\Work\project` scope는 `C:\Work\project-backup`을 포함하지 않습니다.
+- `everything_count`는 request flag를 0으로 두고 `Everything_SetMax(0)`을
+  호출해 경로 목록을 만들지 않고 `Everything_GetTotResults()`만 읽습니다.
+- Everything 1.4 콘텐츠 함수와 알려진 Everything 1.5 content/ADS 별칭 및
+  `from-disk:`는 가능한 각 분기에서 루트가 아닌 scope와 추가 인덱스 축소
+  필터를 요구합니다.
 - SDK 쿼리는 무제한 동기 DLL 호출 대신 공식 비동기 응답 창 API와 15초
   제한 메시지 대기를 사용합니다.
 - 응답 식별자와 SDK 상태를 프로세스 전체에서 관리하고 어댑터 인스턴스 간에
@@ -69,14 +86,50 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 - ES 메타데이터 CSV를 UTF-8로 명시적으로 디코딩하고, SDK 결과 경로는 공식
   필요 길이 조회 후 정확한 크기로 복사합니다.
 
-기능 브랜치의 패키지 버전은 `0.1.0`으로 유지하며, `0.2.0`은 아직 배포되지
-않은 예정 버전입니다. 한영 릴리스 노트는 [변경 기록](CHANGELOG.md)을
-참조하세요.
+릴리스 후보 패키지 버전은 `0.2.0rc1`이고 Git 태그는
+`v0.2.0-rc.1`입니다. 릴리스 검증을 모두 통과한 뒤 최종 패키지 버전
+`0.2.0`과 태그 `v0.2.0`으로 승격합니다. 한영 변경 사항은
+[변경 기록](CHANGELOG.md)을 참조하세요.
 
 권장 적용 방식:
 
 - Codex Desktop 또는 항상 켜 두는 로컬 MCP 호스트에는 `everything-mew-lite`를 사용하세요.
 - FastMCP와 이미 잘 동작하거나 기존 FastMCP 런타임 동작이 필요한 호스트에는 `everything-mew`를 유지하세요.
+
+후보 소스 또는 릴리스 태그를 체크아웃한 뒤 0.1.0에서 업그레이드합니다.
+
+```powershell
+py -m pip install --upgrade .
+```
+
+FastMCP 호환 경로가 필요할 때만 선택 사항을 함께 설치합니다.
+
+```powershell
+py -m pip install --upgrade ".[server]"
+```
+
+기존 `everything-mew`와 `everything-mcp` 호스트 설정은 계속 유효합니다.
+대기 메모리가 낮은 경로를 사용하려면 명령을 `everything-mew-lite`로 바꾸거나
+`python -m everything_mcp.lite_stdio`를 사용하세요.
+
+## 검색 문법 호환성과 안전
+
+Everything 1.4.1 핵심 문법을 기본 호환 프로필로 사용합니다. Everything 1.5
+전용으로 문서화된 기능을 사용하기 전에는 `everything_status`로 실행 버전을
+확인하세요. SDK는 검색 문자열을 전달하고, 실제 문법 해석은 실행 중인
+Everything 프로세스가 담당합니다.
+
+절대 디렉터리는 `scope` 인자로 전달합니다. 예를 들어
+`scope="C:\Work\project"`는 재귀 폴더 경계인 `"C:\Work\project\"`로
+합성됩니다. 전체 경로 부분 일치인 `path:"C:\Work\project"`로 대체하면
+접두사가 같은 형제 폴더까지 포함될 수 있습니다.
+
+content 별칭, byte-stream/ADS content 함수, `content*:` literal-tail 형식,
+`binary:content:` 같은 중첩 modifier 체인, `from-disk:`는 느린 I/O입니다.
+루트가 아닌 scope와 `ext:txt` 같은 별도 인덱스 필터를 함께 사용해야 합니다.
+Everything 연산자나 공백이 들어간 정규식은
+`regex:"gr(a|e)y" ext:txt`처럼 인용하세요. 명시적인 `< >` 그룹이 없으면
+OR가 AND보다 먼저 평가됩니다.
 
 ## 요구 사항
 
@@ -93,7 +146,13 @@ Everything_Mew는 후보 발견을 위한 도구이며, 코드 이해, 중복 �
 공식 출처:
 
 - Everything: <https://www.voidtools.com/>
+- Everything 1.4 호환 검색 안내: <https://www.voidtools.com/support/everything/searching/>
+- Everything 1.5 검색 문법: <https://www.voidtools.com/ko-kr/support/everything/search_syntax/>
+- Everything 1.5 검색 modifier: <https://www.voidtools.com/ko-kr/support/everything/search_modifiers/>
+- Everything 1.5 검색 함수: <https://www.voidtools.com/ko-kr/support/everything/search_functions/>
 - Everything SDK: <https://www.voidtools.com/support/everything/sdk/>
+- Everything_SetMax: <https://www.voidtools.com/support/everything/sdk/everything_setmax/>
+- Everything_GetTotResults: <https://www.voidtools.com/support/everything/sdk/everything_gettotresults/>
 - SDK 다운로드: <https://www.voidtools.com/Everything-SDK.zip>
 
 ## 설치
@@ -186,6 +245,7 @@ FastAPI를 시작하거나 요구하지 않으며 FastMCP도 필요하지 않습
 - [`opencode.example.json`](opencode.example.json): MCP 등록 예시.
 - [`docs/AGENT_INSTALLATION_GUIDE.md`](docs/AGENT_INSTALLATION_GUIDE.md): 에이전트용 안전 설치 가이드.
 - [`docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md`](docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md): SDK 중심 설치 안내.
+- [`docs/releases/`](docs/releases/): GitHub 게시용 한영 릴리스 노트 초안.
 - [`CHANGELOG.md`](CHANGELOG.md): 한영 예정/배포 변경 기록.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): 기여 및 릴리스 재현 명령.
 - [`SECURITY.md`](SECURITY.md): 비공개 취약점 신고 정책.

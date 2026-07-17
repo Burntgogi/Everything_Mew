@@ -109,9 +109,26 @@ items, actual sort, available metadata, and notes.
 
 ### 5. Count and pagination
 
-Keep `everything_count` total-only for the current release. File/folder subtotals and
-`Everything_SetOffset` pagination should remain deferred until a concrete client use
-case and live SDK tests require them.
+Keep `everything_count` total-only for the current release. Total-only applies to the
+IPC payload, not only the public response: set request flags to zero and call
+`Everything_SetMax(0)` before the query, then read `Everything_GetTotResults`. Live
+verification on Everything 1.4.1 must show the same total with zero visible results.
+File/folder subtotals and `Everything_SetOffset` pagination remain deferred until a
+concrete client use case and live SDK tests require them.
+
+### 6. Search syntax and exact scope addendum (2026-07-17)
+
+Use Everything 1.4.1 core syntax as the default compatibility profile. A recursive
+scope such as `C:\Work\project` must be sent as `"C:\Work\project\"`, not as
+`path:"C:\Work\project"`; `path:` is a partial full-path modifier and can include a
+prefix sibling. Returned SDK and ES paths are checked against the normalized scope as
+defense in depth.
+
+Known Everything 1.5 content aliases, alternate-data-stream content functions,
+`content*:` literal-tail forms, nested content modifier chains, and `from-disk:` are
+classified as slow I/O. Each affected OR branch requires a non-root scope and a
+separate indexed narrowing filter. Regex containing `|`, spaces, `<`, or `>` must be
+quoted before it reaches the local safety parser.
 
 ## ES Fallback Implications
 
@@ -153,7 +170,13 @@ change.
 - [Everything_Reset](https://www.voidtools.com/support/everything/sdk/everything_reset/)
 - [Everything_CleanUp](https://www.voidtools.com/support/everything/sdk/everything_cleanup/)
 - [Everything_SetRequestFlags](https://www.voidtools.com/support/everything/sdk/everything_setrequestflags/)
+- [Everything_SetMax](https://www.voidtools.com/support/everything/sdk/everything_setmax/)
+- [Everything_GetTotResults](https://www.voidtools.com/support/everything/sdk/everything_gettotresults/)
 - [Everything_GetResultListSort](https://www.voidtools.com/support/everything/sdk/everything_getresultlistsort/)
 - [Everything_GetResultListRequestFlags](https://www.voidtools.com/support/everything/sdk/everything_getresultlistrequestflags/)
 - [Everything_GetTargetMachine](https://www.voidtools.com/support/everything/sdk/everything_gettargetmachine/)
+- [Everything Searching](https://www.voidtools.com/support/everything/searching/)
+- [Everything 1.5 Search Syntax](https://www.voidtools.com/support/everything/search_syntax/)
+- [Everything 1.5 Search Modifiers](https://www.voidtools.com/support/everything/search_modifiers/)
+- [Everything 1.5 Search Functions](https://www.voidtools.com/support/everything/search_functions/)
 - [ES command-line interface](https://www.voidtools.com/support/everything/command_line_interface/)

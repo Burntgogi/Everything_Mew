@@ -120,6 +120,7 @@ def test_release_manifest_and_ci_cover_public_sdist_and_fastmcp() -> None:
     assert {path for path in included_paths if path.startswith("/docs/")} == {
         "/docs/AGENT_INSTALLATION_GUIDE.md",
         "/docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md",
+        "/docs/releases/*.md",
     }
     assert {path for path in included_paths if path.startswith("/scripts/")} == {
         "/scripts/measure_lite_sessions.ps1"

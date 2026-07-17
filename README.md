@@ -29,9 +29,21 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP on selected path
 
 Everything_Mew is for candidate discovery, not code understanding, duplicate cleanup, or storage management.
 
+## Release status
+
+| Release line | Role | Package version | Git tag |
+| --- | --- | --- | --- |
+| 0.1 | Original FastMCP-based baseline | `0.1.0` | `v0.1.0` |
+| 0.2 | Current release candidate | `0.2.0rc1` | `v0.2.0-rc.1` |
+
+The `0.1.0` baseline is commit `ffa5eaebaad5524c0bb35a90cf983e66cb9b452d`.
+The 0.2 line is a prerelease candidate; it has not been promoted to final `0.2.0`.
+See the bilingual release notes for [v0.1.0](docs/releases/v0.1.0.md) and
+[v0.2.0-rc.1](docs/releases/v0.2.0-rc.1.md).
+
 ## Update notes
 
-### Planned 0.2.0 (Unreleased): low-standby MCP mode
+### 0.2.0 release candidate: low-standby MCP mode
 
 This update adds a low-standby stdio MCP path for Codex Desktop and other MCP
 hosts that keep one server process alive per active session.
@@ -52,9 +64,15 @@ hosts that keep one server process alive per active session.
 - Contract and safety tests were expanded around lite stdio behavior, read-only tool metadata, adapter selection, broad-query safety, and syntax validation.
 - Broad-query validation now parses quoted terms, negation, `< >` groups, and
   every `|` alternative; malformed or universal alternatives fail closed.
-- All Everything content functions (`content:`, `ansicontent:`,
-  `utf8content:`, `utf16content:`, and `utf16becontent:`) require a non-root
-  scope and an additional indexed narrowing filter in every possible branch.
+- Absolute scopes are composed as quoted recursive folder terms ending in `\`,
+  and returned paths are checked against the normalized boundary before they
+  are serialized. A scope such as `C:\Work\project` cannot match
+  `C:\Work\project-backup`.
+- `everything_count` sets zero request flags and `Everything_SetMax(0)`, so the
+  SDK returns only `Everything_GetTotResults()` instead of materializing paths.
+- Everything 1.4 content functions and known Everything 1.5 content/ADS aliases
+  and `from-disk:` require a non-root scope and an additional indexed narrowing
+  filter in every possible branch.
 - SDK queries use the official asynchronous reply-window API with a bounded
   15-second message wait instead of an unbounded synchronous DLL call.
 - Reply identifiers and SDK state are process-wide and serialized across
@@ -71,13 +89,50 @@ hosts that keep one server process alive per active session.
 - ES metadata CSV is decoded explicitly as UTF-8, and SDK result paths use the
   official required-length query before an exact-size copy.
 
-The feature branch package version remains `0.1.0`; `0.2.0` is a planned,
-unreleased target. See the bilingual [changelog](CHANGELOG.md).
+The release-candidate package version is `0.2.0rc1`; its Git tag is
+`v0.2.0-rc.1`. The final release will use package version `0.2.0` and tag
+`v0.2.0` after the release gates pass. See the bilingual
+[changelog](CHANGELOG.md).
 
 Recommended adoption:
 
 - Use `everything-mew-lite` for Codex Desktop or always-enabled local MCP hosts.
 - Keep `everything-mew` for hosts that already work well with FastMCP or require the existing FastMCP runtime behavior.
+
+Upgrade from 0.1.0 after checking out the candidate source or release tag:
+
+```powershell
+py -m pip install --upgrade .
+```
+
+Install the compatibility FastMCP path only when it is needed:
+
+```powershell
+py -m pip install --upgrade ".[server]"
+```
+
+Existing `everything-mew` and `everything-mcp` host configurations remain
+valid. Change the command to `everything-mew-lite`, or use
+`python -m everything_mcp.lite_stdio`, to opt into the lower-standby path.
+
+## Query compatibility and safety
+
+Everything 1.4.1 core syntax is the default compatibility profile. Check
+`everything_status` before using syntax documented only for Everything 1.5.
+The SDK transports the search string; the running Everything process interprets
+it.
+
+Pass an absolute directory through the `scope` argument. For example,
+`scope="C:\Work\project"` is composed as `"C:\Work\project\"`; this is a
+recursive folder boundary. Do not substitute `path:"C:\Work\project"`, which
+is a partial full-path match and can include prefix siblings.
+
+Content aliases, byte-stream and ADS content functions, `content*:` literal-tail
+forms, nested modifier chains such as `binary:content:`, and `from-disk:` are
+slow I/O. They require a non-root scope plus a separate indexed filter such as
+`ext:txt`. Quote regex patterns containing Everything operators or spaces, for
+example `regex:"gr(a|e)y" ext:txt`. OR has higher precedence than AND unless
+explicit `< >` grouping changes the expression.
 
 ## Requirements
 
@@ -94,7 +149,13 @@ Recommended adoption:
 Official sources:
 
 - Everything: <https://www.voidtools.com/>
+- Everything 1.4-compatible searching guide: <https://www.voidtools.com/support/everything/searching/>
+- Everything 1.5 search syntax: <https://www.voidtools.com/support/everything/search_syntax/>
+- Everything 1.5 search modifiers: <https://www.voidtools.com/support/everything/search_modifiers/>
+- Everything 1.5 search functions: <https://www.voidtools.com/support/everything/search_functions/>
 - Everything SDK: <https://www.voidtools.com/support/everything/sdk/>
+- Everything_SetMax: <https://www.voidtools.com/support/everything/sdk/everything_setmax/>
+- Everything_GetTotResults: <https://www.voidtools.com/support/everything/sdk/everything_gettotresults/>
 - SDK download: <https://www.voidtools.com/Everything-SDK.zip>
 
 ## Installation
@@ -188,6 +249,7 @@ Low-standby mode changes:
 - [`opencode.example.json`](opencode.example.json): example MCP registration.
 - [`docs/AGENT_INSTALLATION_GUIDE.md`](docs/AGENT_INSTALLATION_GUIDE.md): safe agent-facing install guide.
 - [`docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md`](docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md): SDK-focused install notes.
+- [`docs/releases/`](docs/releases/): bilingual GitHub release-note drafts.
 - [`CHANGELOG.md`](CHANGELOG.md): bilingual planned and released changes.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): contributor and release reproduction commands.
 - [`SECURITY.md`](SECURITY.md): private vulnerability reporting policy.

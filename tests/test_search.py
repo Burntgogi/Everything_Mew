@@ -168,7 +168,7 @@ def test_drive_root_scope_counts_as_broad_even_with_extension() -> None:
 
 
 def test_content_search_requires_strong_scope_and_filter() -> None:
-    adapter = SearchAdapter([contracts.SearchHit(path=r"C:\Work\file.md")])
+    adapter = SearchAdapter([contracts.SearchHit(path=r"C:\Work\project\file.md")])
 
     broad = server.everything_search("content:password", scope=r"C:\Work", adapter=adapter)
     narrow = server.everything_search("content:needle ext:md", scope=r"C:\Work\project", adapter=adapter)

@@ -143,12 +143,14 @@ class QueryDll(StatusDll):
         self.query = query
 
     def Everything_SetRequestFlags(self, flags: int) -> None:
+        self.call_order.append("set-request-flags")
         self.request_flags = flags
 
     def Everything_SetSort(self, sort: int) -> None:
         self.requested_sort = sort
 
     def Everything_SetMax(self, limit: int) -> None:
+        self.call_order.append("set-max")
         self.limit = limit
 
     def Everything_SetReplyWindow(self, window: int) -> None:
@@ -675,6 +677,17 @@ def test_sdk_query_uses_async_reply_window_and_bounded_wait(monkeypatch: MonkeyP
     assert window.wait_calls == [sdk_ipc.SDK_QUERY_TIMEOUT_SECONDS]
     assert window.close_calls == 1
     assert dll.reset_calls == 1
+
+
+def test_sdk_count_requests_zero_fields_and_zero_visible_results() -> None:
+    dll = QueryDll()
+    adapter = _adapter(dll)
+
+    assert adapter.count("ext:py", scope=r"C:\Work") == 7
+
+    assert dll.request_flags == 0
+    assert dll.limit == 0
+    assert dll.call_order[:4] == ["set-search", "set-request-flags", "set-max", "query"]
 
 
 def test_sdk_timeout_resets_and_late_reply_cannot_poison_retry(monkeypatch: MonkeyPatch) -> None:

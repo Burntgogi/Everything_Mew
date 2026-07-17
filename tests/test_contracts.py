@@ -1,6 +1,7 @@
 from importlib import import_module
 import json
 from pathlib import Path
+import tomllib
 
 contracts = import_module("everything_mcp.contracts")
 
@@ -41,3 +42,58 @@ def test_readme_and_opencode_prefer_release_console_entrypoint() -> None:
     assert '"command": ["everything-mew-lite"]' in readme
     korean_readme = (root / "README.ko.md").read_text(encoding="utf-8")
     assert '"command": ["everything-mew-lite"]' in korean_readme
+
+
+def test_release_candidate_metadata_and_notes_are_consistent() -> None:
+    root = Path(__file__).resolve().parents[1]
+
+    with (root / "pyproject.toml").open("rb") as pyproject_file:
+        pyproject = tomllib.load(pyproject_file)
+
+    assert pyproject["project"]["version"] == "0.2.0rc1"
+    assert "/docs/releases/*.md" in pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+
+    expected_release_references = {
+        "README.md": ("v0.1.0", "v0.2.0-rc.1"),
+        "README.ko.md": ("v0.1.0", "v0.2.0-rc.1"),
+        "CHANGELOG.md": ("[0.1.0]", "[0.2.0-rc.1]"),
+    }
+    for relative_path, references in expected_release_references.items():
+        document = (root / relative_path).read_text(encoding="utf-8")
+        for reference in references:
+            assert reference in document
+
+    for release_note in ("v0.1.0.md", "v0.2.0-rc.1.md"):
+        assert (root / "docs" / "releases" / release_note).is_file()
+
+
+def test_repository_skill_is_codex_named_and_matches_supported_syntax_profile() -> None:
+    root = Path(__file__).resolve().parents[1]
+    skill = (root / "skills" / "everything" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "name: everything-mew" in skill
+    assert "compatibility: opencode" not in skill
+    assert "Everything 1.4.1" in skill
+    assert '"C:\\Work\\project\\"' in skill
+    assert 'regex:"gr(a|e)y"' in skill
+    assert "from-disk:" in skill
+    assert "content*:" in skill
+
+
+def test_release_documents_cover_scope_count_and_syntax_hardening() -> None:
+    root = Path(__file__).resolve().parents[1]
+    documents = (
+        root / "README.md",
+        root / "README.ko.md",
+        root / "CHANGELOG.md",
+        root / "docs" / "releases" / "v0.2.0-rc.1.md",
+        root / "docs" / "SDK_DESIGN_REVIEW.md",
+    )
+
+    for path in documents:
+        content = path.read_text(encoding="utf-8")
+        assert "Everything 1.4.1" in content, path
+        assert "SetMax(0)" in content, path
+        assert "from-disk:" in content, path
+        assert "content*:" in content, path
+        assert '"C:\\Work\\project\\"' in content, path

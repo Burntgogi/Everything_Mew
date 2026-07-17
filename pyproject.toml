@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "everything-mew"
-version = "0.1.0"
-description = "Everything_Mew: a read-only FastMCP server that helps AI agents search with Everything"
+version = "0.2.0rc1"
+description = "Everything_Mew: a read-only MCP server that helps AI agents search with Everything"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = { file = "LICENSE" }
@@ -19,6 +19,12 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Burntgogi/Everything_Mew"
+Repository = "https://github.com/Burntgogi/Everything_Mew"
+Changelog = "https://github.com/Burntgogi/Everything_Mew/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Burntgogi/Everything_Mew/issues"
 
 [project.optional-dependencies]
 server = ["fastmcp>=2"]
@@ -43,6 +49,7 @@ include = [
     "/README.ko.md",
     "/SECURITY.md",
     "/docs/AGENT_INSTALLATION_GUIDE.md",
+    "/docs/releases/*.md",
     "/docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md",
     "/opencode.example.json",
     "/pyproject.toml",

@@ -194,6 +194,11 @@ sdist에는 소스에서 pytest와 mypy를 재현할 수 있도록 테스트와 
 6. Do not publish or tag until the reviewed artifacts come from the intended
    release commit.
 
+Release naming uses PEP 440 for packages and SemVer-style Git tags. The first
+0.2 candidate is package `0.2.0rc1` with tag `v0.2.0-rc.1`; the approved final
+release is package `0.2.0` with tag `v0.2.0`. The historical `0.1.0` tag must
+point to baseline commit `ffa5eaebaad5524c0bb35a90cf983e66cb9b452d`.
+
 1. 깨끗한 worktree에서 위 개발 의존성을 설치합니다.
 2. Python 3.11과 3.14에서 필수 검사를 실행합니다.
 3. 오래된 로컬 `dist` 산출물을 삭제한 뒤 `python -m build`를 한 번 실행합니다.
@@ -202,3 +207,8 @@ sdist에는 소스에서 pytest와 mypy를 재현할 수 있도록 테스트와 
    Python 코드에 버전을 중복하지 않습니다.
 6. 검토한 산출물이 의도한 릴리스 커밋에서 생성되기 전에는 게시하거나 태그를
    만들지 않습니다.
+
+패키지 버전은 PEP 440, Git 태그는 SemVer 형식을 사용합니다. 첫 0.2 후보는
+패키지 `0.2.0rc1`과 태그 `v0.2.0-rc.1`, 승인된 최종판은 패키지 `0.2.0`과
+태그 `v0.2.0`을 사용합니다. 과거 `v0.1.0` 태그는 기준 커밋
+`ffa5eaebaad5524c0bb35a90cf983e66cb9b452d`를 가리켜야 합니다.

@@ -448,7 +448,8 @@ class SdkIpcAdapter:
 
         def operation() -> int:
             self._set_query(query, scope)
-            dll.Everything_SetRequestFlags(PATH_ONLY_FLAGS)
+            dll.Everything_SetRequestFlags(0)
+            dll.Everything_SetMax(0)
             self._query()
             return int(dll.Everything_GetTotResults())
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ntpath
 import re
 from dataclasses import dataclass
 from pathlib import PureWindowsPath
@@ -10,7 +11,36 @@ from typing import TypeAlias
 POSITIVE_FILTER_PATTERN = re.compile(r"^(?:path:|ext:|dm:|dc:|rc:|size:)", re.IGNORECASE)
 DRIVE_ROOT_PATTERN = re.compile(r"^[a-z]:[\\/]*$", re.IGNORECASE)
 UNC_ROOT_PATTERN = re.compile(r"^[\\/]{2}[^\\/]+(?:[\\/]+[^\\/]+)?[\\/]*$")
-CONTENT_FUNCTIONS = frozenset({"content", "ansicontent", "utf8content", "utf16content", "utf16becontent"})
+CONTENT_FUNCTIONS = frozenset(
+    {
+        "content",
+        "ansicontent",
+        "contenta",
+        "asciicontent",
+        "binarycontent",
+        "bytestreamcontent",
+        "octetstreamcontent",
+        "utf8content",
+        "utf16content",
+        "utf16becontent",
+        "alternatedatastreamansi",
+        "adsansi",
+        "alternatedatastreamhex",
+        "adshex",
+        "alternatedatastreamtextplain",
+        "adstextplain",
+        "alternatedatastreamutf16",
+        "adsutf16",
+        "alternatedatastreamutf16be",
+        "adsutf16be",
+        "alternatedatastreamutf8",
+        "adsutf8",
+    }
+)
+FORCED_DISK_MODIFIERS = frozenset({"fromdisk"})
+REGEX_FUNCTIONS = frozenset({"regex"})
+WILDCARD_FUNCTIONS = frozenset({"wildcards"})
+FUNCTION_CHAIN_IDENTIFIER_PATTERN = re.compile(r"^\??[A-Za-z][A-Za-z0-9_-]*\*?$")
 NARROWING_FUNCTIONS = frozenset(
     {
         "path",
@@ -110,6 +140,7 @@ class _TermInfo:
     path_signal: bool
     root_path: bool
     content_search: bool
+    disk_search: bool
     extension_filter: bool
     regex_search: bool
     pattern_modifier: bool
@@ -119,7 +150,11 @@ def compose_query(query: str, scope: str | None = None) -> str:
     text = query.strip()
     if not scope or not scope.strip():
         return text
-    return f"path:{quote_everything_phrase(normalize_scope(scope))} {text}".strip()
+    normalized_scope = normalize_scope(scope)
+    if not is_absolute_scope(normalized_scope):
+        raise QuerySyntaxError("scope must be an absolute Windows drive or UNC path")
+    recursive_scope = normalized_scope if normalized_scope.endswith("\\") else f"{normalized_scope}\\"
+    return f"{quote_everything_phrase(recursive_scope)} {text}".strip()
 
 
 def quote_everything_phrase(value: str) -> str:
@@ -131,10 +166,33 @@ def normalize_scope(scope: str) -> str:
     text = scope.strip().strip('"')
     if not text:
         return text
-    normalized = str(PureWindowsPath(text))
+    normalized = ntpath.normpath(str(PureWindowsPath(text)))
     if DRIVE_ROOT_PATTERN.match(normalized):
         return normalized if normalized.endswith("\\") else f"{normalized}\\"
     return normalized.rstrip("\\/")
+
+
+def is_absolute_scope(value: str | None) -> bool:
+    if value is None or not value.strip():
+        return False
+    normalized = normalize_scope(value)
+    path = PureWindowsPath(normalized)
+    return path.is_absolute() and bool(path.drive) and bool(path.root)
+
+
+def is_path_within_scope(path: str, scope: str | None) -> bool:
+    if scope is None or not scope.strip():
+        return True
+    if not is_absolute_scope(scope):
+        return False
+    normalized_path = ntpath.normcase(ntpath.normpath(path.strip().strip('"')))
+    normalized_scope = ntpath.normcase(normalize_scope(scope))
+    if not PureWindowsPath(normalized_path).is_absolute():
+        return False
+    try:
+        return ntpath.commonpath((normalized_path, normalized_scope)) == normalized_scope
+    except ValueError:
+        return False
 
 
 def is_drive_root(value: str | None) -> bool:
@@ -156,7 +214,7 @@ def is_root_scope(value: str | None) -> bool:
 def is_safe_query(query: str, scope: str | None = None) -> bool:
     """Return whether every possible Everything query branch is acceptably narrow."""
     text = query.strip()
-    if not text or is_root_scope(scope):
+    if not text or is_root_scope(scope) or bool(scope and scope.strip() and not is_absolute_scope(scope)):
         return False
     try:
         tree = _QueryParser(_tokenize(text)).parse()
@@ -178,11 +236,17 @@ def is_safe_query(query: str, scope: str | None = None) -> bool:
         if not meaningful:
             return False
         if any(info.regex_search for info, _ in analysed) and not any(
-            info.narrowing_filter and not info.content_search and not info.pattern_modifier for info in positive
+            info.narrowing_filter
+            and not info.content_search
+            and not info.disk_search
+            and not info.pattern_modifier
+            for info in positive
         ):
             return False
-        if any(info.content_search for info, _ in analysed):
-            if not has_scope or not any(info.narrowing_filter and not info.content_search for info in positive):
+        if any(info.content_search or info.disk_search for info, _ in analysed):
+            if not has_scope or not any(
+                info.narrowing_filter and not info.content_search and not info.disk_search for info in positive
+            ):
                 return False
         if has_scope:
             continue
@@ -448,14 +512,20 @@ def _or_alternatives_are_meaningful(node: _QueryNode) -> bool:
 
 def _analyse_term(raw: str) -> _TermInfo:
     text = raw.strip()
+    content_search = _term_contains_function(text, CONTENT_FUNCTIONS)
+    disk_search = _term_contains_function(text, FORCED_DISK_MODIFIERS)
+    regex_search = _term_contains_function(text, REGEX_FUNCTIONS)
+    wildcard_search = _term_contains_function(text, WILDCARD_FUNCTIONS)
     active_regex = False
     active_wildcards = False
     path_signal = False
     while True:
+        if text.startswith("::"):
+            text = text[2:]
         name, separator, value = text.partition(":")
         if not separator:
             break
-        lowered_name = name.lower()
+        lowered_name = _canonical_identifier(name)
         if lowered_name == "path":
             path_signal = True
             text = value
@@ -468,17 +538,20 @@ def _analyse_term(raw: str) -> _TermInfo:
             active_wildcards = True
             text = value
             continue
+        if lowered_name in FORCED_DISK_MODIFIERS:
+            text = value
+            continue
         if lowered_name in PREFIX_MODIFIERS:
             text = value
             continue
         break
 
     function_name, separator, function_value = text.partition(":")
-    lowered_function = function_name.lower()
-    content_search = bool(separator and lowered_function in CONTENT_FUNCTIONS)
+    lowered_function = _canonical_identifier(function_name)
+    content_search = content_search or bool(separator and lowered_function in CONTENT_FUNCTIONS)
     extension_filter = bool(separator and lowered_function == "ext")
     if active_regex or active_wildcards:
-        nested_function = bool(separator and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", function_name))
+        nested_function = bool(separator and FUNCTION_CHAIN_IDENTIFIER_PATTERN.fullmatch(function_name))
         value = _unquote_phrase(function_value if nested_function else text)
         path_signal = path_signal or bool(
             nested_function and lowered_function in {"path", "parent", "infolder", "nosubfolders"}
@@ -487,17 +560,18 @@ def _analyse_term(raw: str) -> _TermInfo:
         return _TermInfo(
             valid=valid,
             meaningful=meaningful,
-            narrowing_filter=meaningful and not content_search and not active_regex,
+            narrowing_filter=meaningful and not content_search and not regex_search,
             path_signal=path_signal,
             root_path=path_signal and is_root_scope(value),
             content_search=content_search,
+            disk_search=disk_search,
             extension_filter=extension_filter,
-            regex_search=active_regex,
+            regex_search=regex_search,
             pattern_modifier=True,
         )
     if content_search or separator and lowered_function in NARROWING_FUNCTIONS:
         value = _unquote_phrase(function_value)
-        regex_mode = lowered_function == "regex"
+        regex_mode = regex_search
         path_signal = path_signal or lowered_function in {"path", "parent", "infolder", "nosubfolders"}
         meaningful, valid = _pattern_is_meaningful(value, regex_mode)
         narrowing_filter = meaningful and not content_search
@@ -509,9 +583,10 @@ def _analyse_term(raw: str) -> _TermInfo:
             path_signal=path_signal,
             root_path=root_path,
             content_search=content_search,
+            disk_search=disk_search,
             extension_filter=extension_filter,
-            regex_search=False,
-            pattern_modifier=False,
+            regex_search=regex_search,
+            pattern_modifier=regex_search or wildcard_search,
         )
 
     value = _unquote_phrase(text)
@@ -522,14 +597,32 @@ def _analyse_term(raw: str) -> _TermInfo:
     return _TermInfo(
         valid=valid,
         meaningful=meaningful,
-        narrowing_filter=meaningful and path_signal,
+        narrowing_filter=meaningful and path_signal and not content_search and not disk_search,
         path_signal=path_signal,
         root_path=path_signal and is_root_scope(unquoted),
-        content_search=False,
+        content_search=content_search,
+        disk_search=disk_search,
         extension_filter=False,
-        regex_search=False,
-        pattern_modifier=False,
+        regex_search=regex_search,
+        pattern_modifier=regex_search or wildcard_search,
     )
+
+
+def _canonical_identifier(value: str) -> str:
+    return value.lower().lstrip("?").removesuffix("*").replace("-", "")
+
+
+def _term_contains_function(raw: str, names: frozenset[str]) -> bool:
+    text = raw.strip()
+    while True:
+        if text.startswith("::"):
+            text = text[2:]
+        name, separator, value = text.partition(":")
+        if not separator or not FUNCTION_CHAIN_IDENTIFIER_PATTERN.fullmatch(name):
+            return False
+        if _canonical_identifier(name) in names:
+            return True
+        text = value
 
 
 def _pattern_is_meaningful(value: str, regex_mode: bool | None) -> tuple[bool, bool]:
