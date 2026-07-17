@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from everything_mcp.contracts import AdapterStatus, SearchHit, SortName
+from everything_mcp.contracts import AdapterStatus, SearchBatch, SearchHit, SortName
 
 
 class EverythingAdapter(Protocol):
@@ -25,6 +25,6 @@ class EverythingAdapter(Protocol):
         limit: int = 25,
         sort: SortName = "name",
         metadata: bool = False,
-    ) -> list[SearchHit]:
+    ) -> list[SearchHit] | SearchBatch:
         """Return indexed path candidates for a read-only query."""
         ...

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
 BackendName = Literal["sdk-ipc", "es-cli", "http", "none"]
 SortName = Literal["name", "path", "size", "date_modified"]
+TargetMachineName = Literal["x86", "x64", "ARM", "ARM64"]
 
 DEFAULT_LIMIT = 25
 HARD_LIMIT = 100
@@ -21,9 +23,12 @@ class AdapterStatus:
     es_cli_available: bool
     http_available: bool = False
     notes: tuple[str, ...] = ()
+    db_loaded: bool | None = None
+    version: str | None = None
+    target_machine: TargetMachineName | None = None
 
     def to_tool_result(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "everythingInstalled": self.everything_installed,
             "everythingRunning": self.everything_running,
             "backend": self.backend,
@@ -31,6 +36,13 @@ class AdapterStatus:
             "httpAvailable": self.http_available,
             "notes": list(self.notes),
         }
+        if self.db_loaded is not None:
+            result["dbLoaded"] = self.db_loaded
+        if self.version is not None:
+            result["version"] = self.version
+        if self.target_machine is not None:
+            result["targetMachine"] = self.target_machine
+        return result
 
 
 @dataclass(frozen=True)
@@ -51,13 +63,22 @@ class SearchHit:
         return item
 
 
+@dataclass(frozen=True)
+class SearchBatch:
+    hits: tuple[SearchHit, ...]
+    notes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "hits", tuple(self.hits))
+
+
 def clamp_limit(limit: int | None) -> int:
     if limit is None:
         return DEFAULT_LIMIT
     return max(1, min(int(limit), HARD_LIMIT))
 
 
-def path_first_items(items: list[SearchHit], metadata: bool) -> list[str] | list[dict[str, Any]]:
+def path_first_items(items: Sequence[SearchHit], metadata: bool) -> list[str] | list[dict[str, Any]]:
     if metadata:
         return [item.to_metadata_result() for item in items]
     return [item.path for item in items]

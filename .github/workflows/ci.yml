@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,server]"
+
+      - name: Smoke-test FastMCP registration
+        shell: pwsh
+        run: |
+          @'
+          import asyncio
+
+          from everything_mcp.server import create_mcp
+
+          server = create_mcp()
+          tools = asyncio.run(server.list_tools())
+          tool_names = {tool.name for tool in tools}
+          assert tool_names == {
+              "everything_status",
+              "everything_count",
+              "everything_search",
+              "everything_syntax_help",
+          }, tool_names
+          print(f"FastMCP registration passed: {type(server).__name__}, tools={len(tool_names)}")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Run Ruff
+        run: python -m ruff check .
+
+      - name: Run strict mypy
+        run: python -m mypy --strict src tests
+
+      - name: Build wheel and source distribution
+        run: python -m build
+
+      - name: Smoke-test installed wheel lite stdio
+        shell: pwsh
+        run: |
+          $wheels = @(Get-ChildItem -LiteralPath dist -Filter *.whl)
+          if ($wheels.Count -ne 1) {
+              throw "Expected one wheel, found $($wheels.Count)."
+          }
+
+          python -m venv .wheel-smoke
+          & .\.wheel-smoke\Scripts\python.exe -m pip install --no-deps --no-index $wheels[0].FullName
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          @'
+          import json
+          import os
+          import subprocess
+          import sys
+          from importlib.metadata import version
+          from pathlib import Path
+
+          import everything_mcp
+
+          environment = os.environ.copy()
+          environment.pop("PYTHONPATH", None)
+          package_path = Path(everything_mcp.__file__).resolve()
+          assert package_path.is_relative_to(Path(sys.prefix).resolve()), package_path
+
+          entrypoint = Path(sys.executable).with_name("everything-mew-lite.exe")
+          assert entrypoint.is_file(), entrypoint
+          messages = [
+              {
+                  "jsonrpc": "2.0",
+                  "id": 1,
+                  "method": "initialize",
+                  "params": {
+                      "protocolVersion": "2025-11-25",
+                      "capabilities": {},
+                      "clientInfo": {"name": "wheel-smoke", "version": "1"},
+                  },
+              },
+              {"jsonrpc": "2.0", "method": "notifications/initialized"},
+              {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+          ]
+          completed = subprocess.run(
+              [str(entrypoint)],
+              input="\n".join(json.dumps(message) for message in messages) + "\n",
+              text=True,
+              capture_output=True,
+              check=True,
+              env=environment,
+          )
+          assert not completed.stderr, completed.stderr
+          responses = [json.loads(line) for line in completed.stdout.splitlines() if line]
+          assert [response["id"] for response in responses] == [1, 2], responses
+
+          installed_version = version("everything-mew")
+          server_version = responses[0]["result"]["serverInfo"]["version"]
+          assert server_version == installed_version, (server_version, installed_version)
+
+          tool_names = {tool["name"] for tool in responses[1]["result"]["tools"]}
+          assert tool_names == {
+              "everything_status",
+              "everything_count",
+              "everything_search",
+              "everything_syntax_help",
+          }, tool_names
+          print(f"wheel smoke passed: version={server_version}, tools={len(tool_names)}")
+          '@ | & .\.wheel-smoke\Scripts\python.exe -
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }

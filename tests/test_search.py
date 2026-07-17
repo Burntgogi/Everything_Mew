@@ -1,4 +1,12 @@
 from importlib import import_module
+from pathlib import Path
+import subprocess
+from typing import Any
+
+import pytest
+from pytest import MonkeyPatch
+
+from everything_mcp.adapters.es_cli import EsCliAdapter
 
 contracts = import_module("everything_mcp.contracts")
 server = import_module("everything_mcp.server")
@@ -7,14 +15,44 @@ server = import_module("everything_mcp.server")
 class SearchAdapter:
     name = "fake"
 
+    def __init__(self, hits: list[object], backend: str = "sdk-ipc") -> None:
+        self.hits = hits
+        self.backend = backend
+        self.calls: list[dict[str, object]] = []
+
+    def status(self) -> Any:
+        return contracts.AdapterStatus(True, True, self.backend, self.backend == "es-cli")
+
+    def search(
+        self,
+        query: str,
+        scope: str | None = None,
+        limit: int = 25,
+        sort: str = "name",
+        metadata: bool = False,
+    ) -> list[object]:
+        self.calls.append({"query": query, "scope": scope, "limit": limit, "sort": sort, "metadata": metadata})
+        return self.hits[:limit]
+
+
+class SdkFixtureAdapter:
+    name = "sdk-ipc"
+
     def __init__(self, hits: list[object]) -> None:
         self.hits = hits
         self.calls: list[dict[str, object]] = []
 
-    def status(self):
+    def status(self) -> Any:
         return contracts.AdapterStatus(True, True, "sdk-ipc", False)
 
-    def search(self, query: str, scope: str | None = None, limit: int = 25, sort: str = "name", metadata: bool = False):
+    def search(
+        self,
+        query: str,
+        scope: str | None = None,
+        limit: int = 25,
+        sort: str = "name",
+        metadata: bool = False,
+    ) -> list[object]:
         self.calls.append({"query": query, "scope": scope, "limit": limit, "sort": sort, "metadata": metadata})
         return self.hits[:limit]
 
@@ -40,6 +78,31 @@ def test_search_metadata_is_opt_in() -> None:
     assert result["items"] == [{"path": r"C:\Work\README.md", "size": 10, "dateModified": "2026-04-26", "attributes": "A"}]
 
 
+def test_search_batch_adds_diagnostic_note_without_changing_truncation() -> None:
+    hits = [contracts.SearchHit(path=fr"C:\Work\file{i}.md") for i in range(30)]
+    adapter = SearchAdapter(hits)
+
+    def search_with_note(**_: object) -> object:
+        return contracts.SearchBatch(hits=hits[:26], notes=("SDK returned different result capabilities.",))
+
+    adapter.search = search_with_note  # type: ignore[assignment]
+
+    result = server.everything_search("ext:md", scope=r"C:\Work", adapter=adapter)
+
+    assert result["countReturned"] == 25
+    assert result["truncated"] is True
+    assert result["notes"] == ["SDK returned different result capabilities."]
+    assert result["items"][-1] == r"C:\Work\file24.md"
+
+
+def test_search_batch_converts_hits_to_an_immutable_tuple() -> None:
+    batch = contracts.SearchBatch(hits=[contracts.SearchHit(path=r"C:\Work\file.md")])
+
+    assert batch.hits == (contracts.SearchHit(path=r"C:\Work\file.md"),)
+    with pytest.raises(AttributeError):
+        getattr(batch.hits, "append")(contracts.SearchHit(path=r"C:\Work\other.md"))
+
+
 def test_search_hard_caps_limit_to_100() -> None:
     hits = [contracts.SearchHit(path=fr"C:\Work\file{i}.md") for i in range(150)]
     adapter = SearchAdapter(hits)
@@ -49,6 +112,29 @@ def test_search_hard_caps_limit_to_100() -> None:
     assert result["countReturned"] == 100
     assert result["truncated"] is True
     assert adapter.calls[0]["limit"] == 101
+
+
+def test_sdk_and_real_es_adapter_have_the_same_public_limit_sort_and_truncation_contract(monkeypatch: MonkeyPatch) -> None:
+    hits = [contracts.SearchHit(path=fr"C:\Work\file{i}.md") for i in range(101)]
+    sdk_adapter = SdkFixtureAdapter(hits)
+    es_calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        es_calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="\n".join(hit.path for hit in hits), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    es_adapter = EsCliAdapter(Path(r"C:\Tools\es.exe"))
+
+    sdk_result = server.everything_search("ext:md", scope=r"C:\Work", limit=100, sort="date_modified", adapter=sdk_adapter)
+    es_result = server.everything_search("ext:md", scope=r"C:\Work", limit=100, sort="date_modified", adapter=es_adapter)
+
+    assert sdk_result == es_result
+    assert sdk_result["countReturned"] == 100
+    assert sdk_result["truncated"] is True
+    assert sdk_adapter.calls[0]["limit"] == 101
+    assert sdk_adapter.calls[0]["sort"] == "date_modified"
+    assert es_calls[0][1:5] == ["-n", "101", "-sort", "date-modified-ascending"]
 
 
 def test_broad_search_does_not_dump_results() -> None:
@@ -82,7 +168,7 @@ def test_drive_root_scope_counts_as_broad_even_with_extension() -> None:
 
 
 def test_content_search_requires_strong_scope_and_filter() -> None:
-    adapter = SearchAdapter([contracts.SearchHit(path=r"C:\Work\file.md")])
+    adapter = SearchAdapter([contracts.SearchHit(path=r"C:\Work\project\file.md")])
 
     broad = server.everything_search("content:password", scope=r"C:\Work", adapter=adapter)
     narrow = server.everything_search("content:needle ext:md", scope=r"C:\Work\project", adapter=adapter)

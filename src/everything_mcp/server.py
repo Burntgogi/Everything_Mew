@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import re
 from importlib import import_module
 from typing import Any
 
 from .adapters import EverythingAdapter, select_adapter
-from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, AdapterStatus, SortName, clamp_limit, path_first_items
+from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, SearchBatch, SortName, clamp_limit, path_first_items
 from .errors import BackendUnavailableError, EverythingMcpError
-from .query import has_path_signal, has_strong_filter, is_drive_root
+from .query import (
+    is_path_within_scope,
+    is_safe_query,
+)
 from .syntax import syntax_help
 
 TOOL_NAMES = ("everything_status", "everything_count", "everything_search", "everything_syntax_help")
@@ -28,7 +30,7 @@ def everything_count(query: str, scope: str | None = None, adapter: EverythingAd
         return {
             "count": None,
             "tooBroad": True,
-            "recommendation": "refine with a path, extension, date, size, or exclusion before searching",
+            "recommendation": "refine with a path, filename, extension, date, or size before searching",
         }
     selected = adapter or select_adapter()
     try:
@@ -57,16 +59,24 @@ def everything_search(
             "countReturned": 0,
             "truncated": False,
             "tooBroad": True,
-            "recommendation": "call everything_count after adding path, extension, date, size, or exclusion filters",
+            "recommendation": "call everything_count after adding path, filename, extension, date, or size filters",
             "items": [],
         }
     selected = adapter or select_adapter()
     try:
-        hits = selected.search(query=query, scope=scope, limit=safe_limit + 1, sort=sort, metadata=metadata)
+        search_result = selected.search(query=query, scope=scope, limit=safe_limit + 1, sort=sort, metadata=metadata)
     except BackendUnavailableError as exc:
         return {"countReturned": 0, "truncated": False, "items": [], "notes": [str(exc)]}
     except EverythingMcpError as exc:
         return {"countReturned": 0, "truncated": False, "items": [], "notes": [str(exc), syntax_help()]}
+    if isinstance(search_result, SearchBatch):
+        hits = list(search_result.hits)
+        notes = search_result.notes
+    else:
+        hits = search_result
+        notes = ()
+    if scope:
+        hits = [hit for hit in hits if is_path_within_scope(hit.path, scope)]
     truncated = len(hits) > safe_limit
     visible = hits[:safe_limit]
     result: dict[str, Any] = {
@@ -75,7 +85,9 @@ def everything_search(
         "items": path_first_items(visible, metadata),
     }
     if safe_limit == HARD_LIMIT and truncated:
-        result["recommendation"] = "result hard cap reached; refine by path, extension, date, size, or exclusions"
+        result["recommendation"] = "result hard cap reached; refine by path, filename, extension, date, or size"
+    if notes:
+        result["notes"] = list(notes)
     return result
 
 
@@ -84,25 +96,7 @@ def everything_syntax_help(topic: str | None = None) -> str:
 
 
 def is_broad_query(query: str | None, scope: str | None = None) -> bool:
-    text = (query or "").strip()
-    if not text:
-        return True
-    lowered = text.lower()
-    if lowered in {"*", "*.*", "file:", "folder:", "c:\\", "c:/"}:
-        return True
-    if is_drive_root(scope) or (scope is None and is_drive_root(text)):
-        return True
-    if lowered.startswith("content:") and not (scope and not is_drive_root(scope) and has_strong_filter(lowered)):
-        return True
-    if scope and scope.strip():
-        return False
-    has_path = has_path_signal(lowered)
-    has_narrowing_token = has_strong_filter(lowered)
-    if not has_path and not has_narrowing_token:
-        return True
-    if lowered.startswith("ext:") and not has_path and " " not in lowered:
-        return True
-    return False
+    return not is_safe_query((query or "").strip(), scope)
 
 
 def create_mcp() -> Any:

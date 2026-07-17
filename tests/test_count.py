@@ -1,4 +1,5 @@
 from importlib import import_module
+from typing import Any
 
 contracts = import_module("everything_mcp.contracts")
 server = import_module("everything_mcp.server")
@@ -11,7 +12,7 @@ class CountingAdapter:
         self.calls: list[tuple[str, str | None]] = []
         self._count = count
 
-    def status(self):
+    def status(self) -> Any:
         return contracts.AdapterStatus(True, True, "sdk-ipc", False)
 
     def count(self, query: str, scope: str | None = None) -> int:

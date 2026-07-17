@@ -1,0 +1,2 @@
+# Keep source and release artifacts byte-stable across Windows checkouts.
+* text=auto eol=lf
