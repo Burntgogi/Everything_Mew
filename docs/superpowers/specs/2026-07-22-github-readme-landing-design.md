@@ -13,6 +13,10 @@ Redesign the first screen and information hierarchy of `README.md` and `README.k
 3. the existing detailed SDK and query documentation remains available without dominating the introduction; and
 4. English and Korean pages remain structurally equivalent and easy to maintain.
 
+`README.md` is the primary GitHub landing page and is designed and reviewed
+first. `README.ko.md` follows the approved English structure and uses consistent
+Korean honorific prose (`합니다` and `하세요`) for all user-facing guidance.
+
 ## Audiences
 
 - **Primary:** Codex Desktop and other local MCP users who want fast Windows file discovery.
@@ -39,18 +43,17 @@ Avoid marketing claims such as "fastest," "zero cost," or an unqualified memory 
 
 ### Banner
 
-Create one new repository-local landscape banner derived from the existing mascot concept:
+Use the existing repository asset
+`docs/assets/everything-mew-banner.png` without regenerating, editing, cropping,
+or recompressing it:
 
-- target canvas: 1200 x 360 PNG;
-- light, high-contrast background that remains legible on GitHub light and dark page chrome;
-- the existing white cat, magnifying-glass motif, and soft grid remain recognizable;
-- exact title: `Everything_Mew`;
-- exact subtitle: `Low-token path discovery`;
-- no release number, test count, compatibility claim, or installation command embedded in the bitmap;
-- no third-party logo or GitHub mark;
-- provide meaningful English alt text in `README.md` and Korean alt text in `README.ko.md`.
-
-Generate or compose up to three candidate banners, select one, then optimize the final PNG. Keep the existing banner until the replacement passes visual inspection at desktop and narrow GitHub widths. The final asset should remain below 500 KiB when reasonable without visible degradation.
+- preserve its 900 x 620 dimensions, mascot, magnifying-glass motif, grid,
+  colors, title, and subtitle;
+- keep the current centered display width of 420 pixels so the relatively tall
+  image does not dominate the first viewport;
+- use a repository-relative image path instead of a raw-branch URL;
+- provide meaningful English alt text in `README.md` and Korean alt text in
+  `README.ko.md`.
 
 ### Palette And Tone
 
@@ -62,7 +65,7 @@ Generate or compose up to three candidate banners, select one, then optimize the
 
 Both language files use this exact order:
 
-1. full-width landscape banner;
+1. centered existing title image at 420 pixels wide;
 2. centered `Everything_Mew` H1;
 3. centered one-sentence product definition;
 4. factual badge row;
@@ -157,6 +160,11 @@ Machine-specific memory values remain in local release evidence, not in public b
 
 - `README.md` remains English-first and links to `README.ko.md`.
 - `README.ko.md` remains Korean-first and links to `README.md`.
+- English copy and section order are finalized first; Korean is synchronized
+  from that approved structure rather than independently reorganized.
+- Korean user-facing guidance consistently uses honorific endings such as
+  `합니다`, `됩니다`, and `하세요`; terse labels, table cells, commands, and
+  code remain concise where full sentences are unnecessary.
 - Both files use the same section order, badge order, code examples, links, and factual claims.
 - Heading wording may differ naturally by language, but quick links must target the correct localized anchors.
 - A review checklist must compare both heading trees and every code block before merge.
@@ -177,7 +185,8 @@ Machine-specific memory values remain in local release evidence, not in public b
 3. Quick start appears before detailed release notes and SDK syntax discussion.
 4. Every badge and numerical claim has a repository or release-note source.
 5. No machine-specific memory number appears as an evergreen badge or headline claim.
-6. The new banner is legible at 320 px and desktop widths, has correct text, and remains below 500 KiB when practical.
+6. The existing banner is unchanged, uses a relative path, and displays without
+   clipping at desktop and narrow GitHub widths.
 7. All internal links and localized heading anchors resolve.
 8. Code blocks preserve valid PowerShell, JSON, and command syntax.
 9. README changes introduce no personal email, local path, `.env` value, API key, or unpublished release evidence.
@@ -188,6 +197,7 @@ Machine-specific memory values remain in local release evidence, not in public b
 - changing MCP behavior, package APIs, or the Everything SDK adapter;
 - publishing to PyPI;
 - changing the mascot concept or project name;
+- generating, editing, cropping, or recompressing the existing title image;
 - adding unsupported platforms or compatibility claims;
 - creating a separate marketing website;
 - exposing `_nonrelease/` evidence.
