@@ -108,6 +108,24 @@ Restart Codex or open a new task, then call `everything_status`. Confirm that
 the backend is `sdk-ipc`, the database is loaded, and the target architecture
 matches Python before searching.
 
+For OpenCode, keep the SDK path in the parent environment and use its literal
+environment placeholder:
+
+```json
+{
+  "mcp": {
+    "everything-mew": {
+      "type": "local",
+      "command": ["everything-mew-lite"],
+      "enabled": true,
+      "environment": {
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
+      }
+    }
+  }
+}
+```
+
 For the complete path-validation, installation, and smoke-test procedure, see
 the [agent installation guide](docs/AGENT_INSTALLATION_GUIDE.md) and the
 [SDK installation guide](docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md).
@@ -119,6 +137,12 @@ original FastMCP entrypoints:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install ".[server]"
+```
+
+For an editable source checkout, the equivalent compatibility command is:
+
+```powershell
+py -m pip install -e ".[server]"
 ```
 
 The existing `everything-mew` and `everything-mcp` commands use this optional
@@ -173,6 +197,10 @@ Broad-query validation parses quotes, negation, grouping, and every OR branch.
 Each possible branch must be independently narrow. Content, direct-disk, and
 regular-expression searches require additional indexed narrowing conditions;
 universal wildcards, exclusions, or a regex alone do not qualify.
+
+Everything 1.5 `content*:` literal-tail forms and `from-disk:` are treated as
+slow I/O operations. Use them only with a non-root scope and a separate indexed
+filter in every affected branch.
 
 Use `everything_syntax_help` for concise guidance and the official Everything
 documentation for the complete grammar.

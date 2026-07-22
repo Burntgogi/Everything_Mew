@@ -107,6 +107,24 @@ Codex를 재시작하거나 새 작업을 연 뒤 `everything_status`를 호출�
 시작하기 전에 백엔드가 `sdk-ipc`인지, 데이터베이스가 로드되었는지, 대상
 아키텍처가 Python과 일치하는지 확인하세요.
 
+OpenCode에서는 부모 프로세스의 환경 변수에 SDK 경로를 설정하고 다음과 같이
+환경 변수 자리표시자를 그대로 사용하세요.
+
+```json
+{
+  "mcp": {
+    "everything-mew": {
+      "type": "local",
+      "command": ["everything-mew-lite"],
+      "enabled": true,
+      "environment": {
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
+      }
+    }
+  }
+}
+```
+
 전체 경로 검증, 설치, 스모크 테스트 절차는
 [에이전트 설치 가이드](docs/AGENT_INSTALLATION_GUIDE.md)와
 [SDK 설치 가이드](docs/SDK_INSTALL_GUIDE_FOR_AGENTS.md)를 참조하세요.
@@ -118,6 +136,13 @@ Codex를 재시작하거나 새 작업을 연 뒤 `everything_status`를 호출�
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install ".[server]"
+```
+
+소스 체크아웃을 editable 방식으로 사용하는 경우에는 다음 호환 명령을
+실행하세요.
+
+```powershell
+py -m pip install -e ".[server]"
 ```
 
 기존 `everything-mew`와 `everything-mcp` 명령은 이 선택적 경로를 사용합니다.
@@ -174,6 +199,10 @@ Python 어댑터가 아니라 실행 중인 Everything 프로세스에서 해석
 분기는 개별적으로 범위가 제한되어야 합니다. 콘텐츠, 디스크 직접 읽기, 정규식
 검색에는 별도의 인덱스 축소 조건이 필요합니다. 전체 일치 와일드카드, 제외
 조건, 정규식만으로는 축소 조건을 충족하지 않습니다.
+
+Everything 1.5의 `content*:` 리터럴 꼬리 형식과 `from-disk:`는 느린 I/O
+작업으로 취급합니다. 영향을 받는 각 분기에서 루트가 아닌 scope와 별도의
+인덱스 필터를 함께 사용하세요.
 
 간결한 안내는 `everything_syntax_help`를 사용하시고 전체 문법은 공식 Everything
 문서를 참조하세요.
