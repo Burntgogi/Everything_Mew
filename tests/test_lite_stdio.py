@@ -220,6 +220,9 @@ def test_agent_guide_installs_clean_environment_before_running_checks() -> None:
     assert 'pip install -e ".[server]"' not in install_section
     assert "FastMCP validation is optional" in source
     assert '"command": ["everything-mew-lite"]' in source
+    assert "everything-mew-once" in source
+    assert "schemaVersion = 1" in source
+    assert "enabled = false" in source
     assert "from everything_mcp.lite_stdio import" in source
     assert "Expected server type" not in source
     assert "py -m pip" not in install_section
@@ -259,6 +262,8 @@ def test_sdk_guide_defaults_to_runtime_only_lite_install() -> None:
 
     assert '& $python -m pip install -e .' in source
     assert '"command": ["everything-mew-lite"]' in source
+    assert "everything-mew-once" in source
+    assert "enabled = false" in source
     assert "FastMCP is optional" in source
     assert "from everything_mcp.lite_stdio import" in source
 

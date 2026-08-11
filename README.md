@@ -52,10 +52,14 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP on selected path
 - `read`, `grep`, `ast-grep`, and LSP remain responsible for file contents and
   code semantics.
 
-For Codex Desktop and other hosts that keep local MCP processes enabled, the
-recommended entrypoint is `everything-mew-lite`. It handles MCP stdio directly,
-does not require FastAPI or FastMCP, and loads the Everything backend only when
-a tool is called.
+For Codex, the recommended path is the agent skill plus
+`everything-mew-once`. Each request starts one short-lived Python process,
+returns one result, and exits, so no Everything_Mew Python process remains while
+unused. The shared `Everything.exe` indexer continues running. OpenCode and
+manual MCP hosts can keep using `everything-mew-lite`; that compatibility mode
+may retain one Python process per host session. One-shot removes that idle
+multiplication but does not claim a fixed peak-memory value during active
+searches.
 
 ## Quick start
 
@@ -84,18 +88,35 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
 ```
 
-### 3. Register the low-standby server in Codex
+### 3. Use the one-shot runner from Codex
 
 The DLL value below is an example placeholder. Replace it with the exact
 forward-slash path to the trusted, architecture-matching SDK DLL selected on
-your computer. If the console entrypoint is not available on the parent
-process's `PATH`, set `command` to its absolute path inside the venv.
+your computer. Make the installed command available to the Codex process, then
+resolve it to an absolute path before each invocation:
+
+```powershell
+$env:EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$request = @{
+    schemaVersion = 1
+    tool = "everything_status"
+    arguments = @{}
+} | ConvertTo-Json -Compress -Depth 4
+$resultJson = $request | & $runner
+$exitCode = $LASTEXITCODE
+if ($exitCode -notin 0, 1) { throw "Everything_Mew one-shot invocation failed." }
+$resultJson | ConvertFrom-Json
+```
+
+If an existing Codex MCP registration is retained as a rollback path, keep it
+disabled:
 
 ```toml
 [mcp_servers.everything-mew]
 command = "everything-mew-lite"
 args = []
-enabled = true
+enabled = false
 startup_timeout_sec = 20
 tool_timeout_sec = 20
 enabled_tools = ["everything_status", "everything_count", "everything_search", "everything_syntax_help"]
@@ -104,9 +125,11 @@ enabled_tools = ["everything_status", "everything_count", "everything_search", "
 EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
 ```
 
-Restart Codex or open a new task, then call `everything_status`. Confirm that
-the backend is `sdk-ipc`, the database is loaded, and the target architecture
-matches Python before searching.
+`enabled = false` makes the MCP unavailable; it does not sleep and wake on
+demand. After changing this setting, fully restart Codex. Servers already owned
+by a running Codex or OpenCode host exit only when that host closes. Confirm
+that the one-shot `everything_status` result reports `sdk-ipc`, a loaded
+database, and matching Python architecture before searching.
 
 For OpenCode, keep the SDK path in the parent environment and use its literal
 environment placeholder:
@@ -146,8 +169,9 @@ py -m pip install -e ".[server]"
 ```
 
 The existing `everything-mew` and `everything-mcp` commands use this optional
-path. The recommended `everything-mew-lite` and compatibility alias
-`everything-mcp-lite` do not require it.
+path. The recommended Codex command `everything-mew-once`, its
+`everything-mcp-once` alias, and the lite compatibility commands do not require
+it.
 
 ## Tools
 
@@ -209,7 +233,8 @@ documentation for the complete grammar.
 
 ```text
 AI agent
-  -> Everything_Mew MCP tools
+  -> one-shot process or MCP compatibility host
+  -> Everything_Mew read-only tools
   -> SDK/IPC adapter
   -> Everything runtime
   -> Existing Everything index
@@ -221,6 +246,10 @@ The primary adapter uses the official asynchronous SDK reply-window flow with a
 bounded 15-second wait, process-wide SDK serialization, unique reply IDs, and
 state reset after operations. `everything_count` requests only the total count
 with zero result flags and `Everything_SetMax(0)`.
+
+The one-shot path validates one bounded JSON request, reuses the same tool
+dispatcher, publishes one result, and exits. It adds no daemon, HTTP listener,
+or process pool.
 
 The lite MCP path implements the small required stdio lifecycle directly:
 `initialize`, notifications, `ping`, `tools/list`, and `tools/call`. The

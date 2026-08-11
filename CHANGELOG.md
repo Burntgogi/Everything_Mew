@@ -2,6 +2,27 @@
 
 All notable release changes are documented here. / 주요 릴리스 변경 사항을 이 문서에 기록합니다.
 
+## [Unreleased]
+
+### English
+
+- Add bounded `everything-mew-once` and `everything-mcp-once` commands that
+  execute one existing read-only tool request and exit without FastMCP.
+- Make the Codex skill use the one-shot command by default so no
+  Everything_Mew Python process remains while unused.
+- Keep `everything-mew-lite` for OpenCode and manual MCP compatibility, and
+  document that a disabled MCP is unavailable rather than automatically asleep.
+
+### 한국어
+
+- 기존 읽기 전용 도구 요청 하나를 실행한 뒤 종료하는 제한형
+  `everything-mew-once`와 `everything-mcp-once` 명령을 FastMCP 없이
+  추가합니다.
+- 사용하지 않을 때 Everything_Mew Python 프로세스가 남지 않도록 Codex
+  스킬의 기본 실행 경로를 one-shot 명령으로 변경합니다.
+- OpenCode와 수동 MCP 호환용 `everything-mew-lite`를 유지하고, 비활성 MCP는
+  자동 수면 상태가 아니라 사용할 수 없는 상태임을 문서화합니다.
+
 ## [0.2.0] - 2026-07-17
 
 The final package version is `0.2.0` and its Git tag is `v0.2.0`. It was

@@ -2,8 +2,8 @@
 
 ## Purpose
 
-This guide tells AI agents how to install and validate Everything_Mew in
-OpenCode or another local MCP host without destructive actions or
+This guide tells AI agents how to install and validate Everything_Mew for
+Codex, OpenCode, or another local host without destructive actions or
 machine-specific assumptions.
 
 Everything_Mew is Windows-only and SDK-first. The primary backend uses the
@@ -17,8 +17,8 @@ official voidtools Everything SDK over local IPC.
 - Do not overwrite an existing SDK DLL. Stop and report its path.
 - Do not overwrite global MCP/OpenCode configuration without a backup and
   explicit user confirmation.
-- For Codex Desktop, prefer the low-standby `everything-mew-lite` entrypoint
-  when the server will remain enabled across many sessions.
+- For Codex, prefer the `everything-mew-once` command and keep any MCP rollback
+  registration disabled.
 - Do not commit SDK DLLs, local configuration, backups, or machine-specific
   validation logs.
 
@@ -37,8 +37,8 @@ official voidtools Everything SDK over local IPC.
 ## Install The Runtime
 
 From the repository root, create the intended virtual environment, resolve its
-Python executable once, and install only the lite runtime. FastMCP and the
-development toolchain are not part of this default path:
+Python executable once, and install the dependency-free runtime. FastMCP and
+the development toolchain are not part of this default path:
 
 ```powershell
 py -m venv .venv
@@ -52,7 +52,12 @@ entrypoints installed beside that interpreter:
 
 ```powershell
 $scriptsDir = Split-Path -Parent $python
-$entrypointNames = @("everything-mew-lite.exe", "everything-mcp-lite.exe")
+$entrypointNames = @(
+    "everything-mew-once.exe",
+    "everything-mcp-once.exe",
+    "everything-mew-lite.exe",
+    "everything-mcp-lite.exe"
+)
 foreach ($entrypointName in $entrypointNames) {
     $entrypoint = Join-Path $scriptsDir $entrypointName
     if (-not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) {
@@ -175,17 +180,46 @@ Do not place a shell-specific profile expression or a backslash path in the JSON
 value. OpenCode recognizes only the `{env:EVERYTHING_SDK_DLL}` placeholder and
 receives the normalized forward-slash path from its parent environment.
 
-## Configure Codex Low-Standby Mode
+## Configure Codex One-Shot Mode
 
-Codex does not use the OpenCode JSON substitution above. Put the exact
-forward-slash value printed for `$env:EVERYTHING_SDK_DLL` into the Codex MCP
-environment value:
+Codex does not use the OpenCode JSON substitution above. Set the selected DLL
+in the environment inherited by Codex and resolve the installed one-shot
+runner to an absolute path. Send exactly one JSON request and parse stdout only
+after the process exits:
+
+```powershell
+$env:EVERYTHING_SDK_DLL = $dest.Replace("\", "/")
+$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$request = @{
+    schemaVersion = 1
+    tool = "everything_search"
+    arguments = @{
+        query = "ext:py"
+        scope = "C:\Work\project"
+        limit = 10
+        metadata = $false
+    }
+} | ConvertTo-Json -Compress -Depth 4
+$resultJson = $request | & $runner
+$exitCode = $LASTEXITCODE
+if ($exitCode -notin 0, 1) {
+    throw "Everything_Mew one-shot invocation failed."
+}
+$result = $resultJson | ConvertFrom-Json
+```
+
+Do not evaluate the runner path or request as shell code. Exit `0` publishes a
+successful tool result, exit `1` publishes a tool error, and exit `2` means no
+trustworthy result was published.
+
+If the previous MCP registration is retained for rollback, use the absolute
+lite entrypoint path when needed and keep it disabled:
 
 ```toml
 [mcp_servers.everything-mew]
 command = "everything-mew-lite"
 args = []
-enabled = true
+enabled = false
 startup_timeout_sec = 20
 tool_timeout_sec = 20
 enabled_tools = ["everything_status", "everything_count", "everything_search", "everything_syntax_help"]
@@ -194,10 +228,16 @@ enabled_tools = ["everything_status", "everything_count", "everything_search", "
 EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
 ```
 
-The lite entrypoint handles MCP stdio directly and does not import FastMCP at
-startup or during idle tool discovery. Backend modules are imported lazily when
-a tool is called, which keeps standby memory lower while retaining the same four
-read-only tools.
+`enabled = false` makes that MCP unavailable. It does not implement automatic
+sleep and wake. Fully restart Codex after changing the setting; an existing
+server exits only when its owning Codex or OpenCode host closes. The one-shot
+path leaves no Everything_Mew Python process while unused. `Everything.exe`
+remains running as the shared indexer. This removes per-session idle
+multiplication but makes no fixed active-search peak-memory claim.
+
+OpenCode and manual MCP hosts may keep using `everything-mew-lite`. It handles
+MCP stdio directly without importing FastMCP and may retain one Python process
+per host session.
 
 ## Optional Environment Paths
 
@@ -211,7 +251,7 @@ read-only tools.
 ## Validation Steps
 
 In the PowerShell session that selected and installed the DLL, validate the same
-name and path before creating the server:
+name and path, then run one status request:
 
 ```powershell
 if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) {
@@ -223,6 +263,23 @@ if ((Split-Path -Leaf $dest) -ne $dllName) {
 if ($env:EVERYTHING_SDK_DLL -ne $dest.Replace("\", "/")) {
     throw "EVERYTHING_SDK_DLL does not match the selected DLL path."
 }
+$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$request = @{
+    schemaVersion = 1
+    tool = "everything_status"
+    arguments = @{}
+} | ConvertTo-Json -Compress -Depth 4
+$resultJson = $request | & $runner
+if ($LASTEXITCODE -notin 0, 1) {
+    throw "Everything_Mew one-shot validation failed."
+}
+$resultJson | ConvertFrom-Json
+```
+
+For an OpenCode or manual MCP compatibility check, validate the lite lifecycle
+separately:
+
+```powershell
 @'
 from everything_mcp.lite_stdio import LiteSession, handle_message
 

@@ -51,10 +51,14 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP on selected path
   반환합니다.
 - 파일 내용과 코드 의미는 `read`, `grep`, `ast-grep`, LSP로 확인하세요.
 
-Codex Desktop처럼 로컬 MCP 프로세스를 계속 활성화하는 호스트에는
-`everything-mew-lite` 진입점을 권장합니다. 이 진입점은 MCP stdio를 직접
-처리하고 FastAPI나 FastMCP를 요구하지 않으며, 실제 도구를 호출할 때만
-Everything 백엔드를 불러옵니다.
+Codex에는 에이전트 스킬과 `everything-mew-once` 사용을 권장합니다. 요청할
+때마다 수명이 짧은 Python 프로세스 하나가 실행되어 결과 하나를 반환한 뒤
+종료하므로 사용하지 않을 때는 Everything_Mew Python 프로세스가 남지 않습니다.
+공유 인덱서인 `Everything.exe`는 계속 실행됩니다. OpenCode와 수동 MCP
+호스트에서는 호환 모드인 `everything-mew-lite`를 계속 사용할 수 있으며,
+호스트 작업마다 Python 프로세스 하나가 유지될 수 있습니다. one-shot 방식은
+이 유휴 중복을 없애지만 실제 검색 중 최대 메모리가 일정하다고 보장하지는
+않습니다.
 
 ## 빠른 시작
 
@@ -83,18 +87,34 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
 ```
 
-### 3. Codex에 낮은 대기 부담 서버를 등록하세요
+### 3. Codex에서 one-shot 실행기를 사용하세요
 
 아래 DLL 값은 예시 자리표시자입니다. 사용 중인 컴퓨터에서 선택한 신뢰할 수
 있는 SDK DLL의 정확한 경로를 순방향 슬래시로 입력하세요. DLL 비트수는 Python과
-일치해야 합니다. 부모 프로세스의 `PATH`에서 콘솔 진입점을 찾을 수 없다면
-venv 안에 있는 실행 파일의 절대 경로를 `command`에 입력하세요.
+일치해야 합니다. 설치 명령을 Codex 프로세스에서 찾을 수 있게 한 뒤 호출할
+때마다 절대 경로로 확인하세요.
+
+```powershell
+$env:EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$request = @{
+    schemaVersion = 1
+    tool = "everything_status"
+    arguments = @{}
+} | ConvertTo-Json -Compress -Depth 4
+$resultJson = $request | & $runner
+$exitCode = $LASTEXITCODE
+if ($exitCode -notin 0, 1) { throw "Everything_Mew one-shot invocation failed." }
+$resultJson | ConvertFrom-Json
+```
+
+기존 Codex MCP 등록을 롤백 경로로 남기려면 비활성 상태로 유지하세요.
 
 ```toml
 [mcp_servers.everything-mew]
 command = "everything-mew-lite"
 args = []
-enabled = true
+enabled = false
 startup_timeout_sec = 20
 tool_timeout_sec = 20
 enabled_tools = ["everything_status", "everything_count", "everything_search", "everything_syntax_help"]
@@ -103,9 +123,12 @@ enabled_tools = ["everything_status", "everything_count", "everything_search", "
 EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
 ```
 
-Codex를 재시작하거나 새 작업을 연 뒤 `everything_status`를 호출하세요. 검색을
-시작하기 전에 백엔드가 `sdk-ipc`인지, 데이터베이스가 로드되었는지, 대상
-아키텍처가 Python과 일치하는지 확인하세요.
+`enabled = false`는 MCP를 사용할 수 없게 하는 설정이며, 필요할 때 자동으로
+깨우는 수면 모드가 아닙니다. 이 설정을 바꾼 뒤에는 Codex를 완전히
+재시작하세요. 이미 실행 중인 Codex 또는 OpenCode 호스트가 소유한 서버는 해당
+호스트가 종료될 때만 함께 종료됩니다. 검색하기 전에 one-shot
+`everything_status` 결과에서 백엔드가 `sdk-ipc`인지, 데이터베이스가
+로드되었는지, 대상 아키텍처가 Python과 일치하는지 확인하세요.
 
 OpenCode에서는 부모 프로세스의 환경 변수에 SDK 경로를 설정하고 다음과 같이
 환경 변수 자리표시자를 그대로 사용하세요.
@@ -146,8 +169,8 @@ py -m pip install -e ".[server]"
 ```
 
 기존 `everything-mew`와 `everything-mcp` 명령은 이 선택적 경로를 사용합니다.
-권장 명령인 `everything-mew-lite`와 호환 별칭 `everything-mcp-lite`에는
-FastMCP가 필요하지 않습니다.
+Codex 권장 명령인 `everything-mew-once`, 별칭 `everything-mcp-once`, lite
+호환 명령에는 FastMCP가 필요하지 않습니다.
 
 ## 도구
 
@@ -211,7 +234,8 @@ Everything 1.5의 `content*:` 리터럴 꼬리 형식과 `from-disk:`는 느린 
 
 ```text
 AI agent
-  -> Everything_Mew MCP tools
+  -> one-shot process or MCP compatibility host
+  -> Everything_Mew read-only tools
   -> SDK/IPC adapter
   -> Everything runtime
   -> Existing Everything index
@@ -223,6 +247,10 @@ AI agent
 직렬화, 고유 응답 ID, 작업 후 상태 초기화를 사용합니다.
 `everything_count`는 결과 플래그를 0으로 두고 `Everything_SetMax(0)`을 호출해
 전체 개수만 요청합니다.
+
+one-shot 경로는 크기가 제한된 JSON 요청 하나를 검증하고 같은 도구
+디스패처를 사용해 결과 하나를 반환한 뒤 종료합니다. 데몬, HTTP 리스너,
+프로세스 풀을 추가하지 않습니다.
 
 lite MCP 경로는 `initialize`, notification, `ping`, `tools/list`, `tools/call`에
 필요한 작은 stdio 수명 주기를 직접 구현합니다. FastMCP 서버는 같은 도구 함수와
