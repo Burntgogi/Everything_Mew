@@ -1,7 +1,7 @@
 # Everything_Mew Codex One-Shot Runtime Design
 
-**Date:** 2026-08-12  
-**Status:** Approved for implementation by the user's 2026-08-12 request  
+**Date:** 2026-08-12
+**Status:** Approved for implementation by the user's 2026-08-12 request
 **Scope:** Local Codex Desktop integration; existing MCP clients remain supported
 
 ## 1. Problem
