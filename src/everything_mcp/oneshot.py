@@ -36,7 +36,7 @@ def run(stdin: BinaryIO, stdout: BinaryIO, stderr: TextIO) -> int:
             raise ValueError
         tool, arguments = parse_request(data)
         result = call_tool_result(tool, arguments)
-        stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        stdout.write(json.dumps(result, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
         stdout.flush()
         return 1 if result["isError"] else 0
     except Exception:

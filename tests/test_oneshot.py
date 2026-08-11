@@ -104,3 +104,25 @@ def test_run_redacts_unexpected_failures(
     assert code == 2
     assert stdout.getvalue() == b""
     assert stderr.getvalue() == "ONESHOT_INVOCATION_ERROR\n"
+
+
+def test_run_preserves_unpaired_windows_surrogates_in_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = "file-\ud800.txt"
+    monkeypatch.setattr(
+        oneshot,
+        "call_tool_result",
+        lambda _tool, _arguments: {
+            "content": [{"type": "text", "text": text}],
+            "isError": False,
+        },
+    )
+    stdout = BytesIO()
+    stderr = StringIO()
+
+    code = oneshot.run(BytesIO(request("everything_status", {})), stdout, stderr)
+
+    assert code == 0
+    assert json.loads(stdout.getvalue())["content"][0]["text"] == text
+    assert stderr.getvalue() == ""
