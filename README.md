@@ -97,7 +97,7 @@ resolve it to an absolute path before each invocation:
 
 ```powershell
 $env:EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
-$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$runner = (Resolve-Path ".\.venv\Scripts\everything-mew-once.exe").Path
 $request = @{
     schemaVersion = 1
     tool = "everything_status"

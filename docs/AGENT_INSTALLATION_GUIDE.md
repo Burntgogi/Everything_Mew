@@ -65,16 +65,37 @@ foreach ($entrypointName in $entrypointNames) {
     }
     Write-Host $entrypoint
 }
+$oneShotRunner = (Resolve-Path (Join-Path $scriptsDir "everything-mew-once.exe")).Path
 ```
 
-The wheel installs the MCP runtime only. Install the OpenCode skill explicitly
-from the repository or plugin. For a repository checkout, the source is:
+The wheel installs the runtime only. Install the skill explicitly from the
+repository or plugin. For a repository checkout, the source is:
 
 ```text
 skills\everything\SKILL.md
 ```
 
-Choose the destination without embedding it in OpenCode JSON:
+For Codex, create a configured copy with the resolved runner path. Refuse to
+overwrite an existing skill until it has been backed up and replacement is
+explicitly approved:
+
+```powershell
+$skillSource = (Resolve-Path ".\skills\everything\SKILL.md").Path
+$skillDest = Join-Path $env:USERPROFILE ".codex\skills\everything-mew\SKILL.md"
+if (Test-Path -LiteralPath $skillDest -PathType Leaf) {
+    throw "Back up the existing Codex skill and obtain approval before replacing it: $skillDest"
+}
+$placeholder = 'C:\replace\with\absolute\path\to\everything-mew-once.exe'
+$skill = Get-Content -LiteralPath $skillSource -Raw
+if ($skill.IndexOf($placeholder, [StringComparison]::Ordinal) -lt 0) {
+    throw "The one-shot runner placeholder was not found."
+}
+$skill = $skill.Replace($placeholder, $oneShotRunner)
+New-Item -ItemType Directory -Path (Split-Path -Parent $skillDest) -Force | Out-Null
+[IO.File]::WriteAllText($skillDest, $skill, [Text.UTF8Encoding]::new($false))
+```
+
+For OpenCode, choose its skill destination without embedding it in MCP JSON:
 
 ```powershell
 $skillDest = Join-Path $env:USERPROFILE ".config\opencode\skills\everything\SKILL.md"
@@ -189,7 +210,7 @@ after the process exits:
 
 ```powershell
 $env:EVERYTHING_SDK_DLL = $dest.Replace("\", "/")
-$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$runner = $oneShotRunner
 $request = @{
     schemaVersion = 1
     tool = "everything_search"
@@ -263,7 +284,7 @@ if ((Split-Path -Leaf $dest) -ne $dllName) {
 if ($env:EVERYTHING_SDK_DLL -ne $dest.Replace("\", "/")) {
     throw "EVERYTHING_SDK_DLL does not match the selected DLL path."
 }
-$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$runner = $oneShotRunner
 $request = @{
     schemaVersion = 1
     tool = "everything_status"

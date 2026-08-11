@@ -81,7 +81,8 @@ installed runner to an absolute path and send one UTF-8 JSON request per
 process:
 
 ```powershell
-$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$scriptsDir = Split-Path -Parent $python
+$runner = (Resolve-Path (Join-Path $scriptsDir "everything-mew-once.exe")).Path
 $request = @{
     schemaVersion = 1
     tool = "everything_status"

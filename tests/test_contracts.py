@@ -96,7 +96,8 @@ def test_repository_skill_is_codex_named_and_matches_supported_syntax_profile() 
     assert 'regex:"gr(a|e)y"' in skill
     assert "from-disk:" in skill
     assert "content*:" in skill
-    assert '(Get-Command everything-mew-once -ErrorAction Stop).Source' in skill
+    assert '$runner = "C:\\replace\\with\\absolute\\path\\to\\everything-mew-once.exe"' in skill
+    assert "Get-Command everything-mew-once" not in skill
     assert "schemaVersion = 1" in skill
     assert "ConvertTo-Json -Compress -Depth 4" in skill
     assert "$LASTEXITCODE -notin 0, 1" in skill

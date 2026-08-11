@@ -41,7 +41,10 @@ the runner to an absolute path, pass one JSON object on stdin, wait for exit,
 and only then parse stdout:
 
 ```powershell
-$runner = (Get-Command everything-mew-once -ErrorAction Stop).Source
+$runner = "C:\replace\with\absolute\path\to\everything-mew-once.exe"
+if (-not [IO.Path]::IsPathFullyQualified($runner) -or -not (Test-Path -LiteralPath $runner -PathType Leaf)) {
+    throw "Configure the absolute Everything_Mew one-shot runner path."
+}
 $request = @{
     schemaVersion = 1
     tool = "everything_search"

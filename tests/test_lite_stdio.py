@@ -221,6 +221,7 @@ def test_agent_guide_installs_clean_environment_before_running_checks() -> None:
     assert "FastMCP validation is optional" in source
     assert '"command": ["everything-mew-lite"]' in source
     assert "everything-mew-once" in source
+    assert '$oneShotRunner = (Resolve-Path (Join-Path $scriptsDir "everything-mew-once.exe")).Path' in source
     assert "schemaVersion = 1" in source
     assert "enabled = false" in source
     assert "from everything_mcp.lite_stdio import" in source
