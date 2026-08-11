@@ -36,6 +36,8 @@ everything-mew = "everything_mcp.__main__:main"
 everything-mcp = "everything_mcp.__main__:main"
 everything-mew-lite = "everything_mcp.lite_stdio:main"
 everything-mcp-lite = "everything_mcp.lite_stdio:main"
+everything-mew-once = "everything_mcp.oneshot:main"
+everything-mcp-once = "everything_mcp.oneshot:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/everything_mcp"]
