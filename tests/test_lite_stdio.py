@@ -222,8 +222,12 @@ def test_agent_guide_installs_clean_environment_before_running_checks() -> None:
     assert '"command": ["everything-mew-lite"]' in source
     assert "everything-mew-once" in source
     assert '$oneShotRunner = (Resolve-Path (Join-Path $scriptsDir "everything-mew-once.exe")).Path' in source
-    assert "$sdkPlaceholder" in source
-    assert "$skill.Replace($sdkPlaceholder, $dest)" in source
+    assert '$runnerLiteral = $oneShotRunner.Replace("\'", "\'\'")' in source
+    assert '$sdkLiteral = $dest.Replace("\'", "\'\'")' in source
+    assert "$skill.Replace($sdkPlaceholder, $sdkLiteral)" in source
+    assert source.index('$dest = Join-Path $destDir $dllName') < source.index(
+        "$skill = $skill.Replace($sdkPlaceholder, $sdkLiteral)"
+    )
     assert "schemaVersion = 1" in source
     assert "enabled = false" in source
     assert "from everything_mcp.lite_stdio import" in source

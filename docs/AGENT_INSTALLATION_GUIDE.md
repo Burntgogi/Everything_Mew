@@ -75,28 +75,8 @@ repository or plugin. For a repository checkout, the source is:
 skills\everything\SKILL.md
 ```
 
-For Codex, create a configured copy with the resolved runner path. Refuse to
-overwrite an existing skill until it has been backed up and replacement is
-explicitly approved:
-
-```powershell
-$skillSource = (Resolve-Path ".\skills\everything\SKILL.md").Path
-$skillDest = Join-Path $env:USERPROFILE ".codex\skills\everything-mew\SKILL.md"
-if (Test-Path -LiteralPath $skillDest -PathType Leaf) {
-    throw "Back up the existing Codex skill and obtain approval before replacing it: $skillDest"
-}
-$runnerPlaceholder = 'C:\replace\with\absolute\path\to\everything-mew-once.exe'
-$sdkPlaceholder = 'C:\replace\with\absolute\path\to\EverythingSDK.dll'
-$skill = Get-Content -LiteralPath $skillSource -Raw
-if ($skill.IndexOf($runnerPlaceholder, [StringComparison]::Ordinal) -lt 0 -or
-    $skill.IndexOf($sdkPlaceholder, [StringComparison]::Ordinal) -lt 0) {
-    throw "A one-shot installation placeholder was not found."
-}
-$skill = $skill.Replace($runnerPlaceholder, $oneShotRunner)
-$skill = $skill.Replace($sdkPlaceholder, $dest)
-New-Item -ItemType Directory -Path (Split-Path -Parent $skillDest) -Force | Out-Null
-[IO.File]::WriteAllText($skillDest, $skill, [Text.UTF8Encoding]::new($false))
-```
+Configure the Codex skill after selecting the SDK DLL below so both absolute
+paths can be injected together.
 
 For OpenCode, choose its skill destination without embedding it in MCP JSON:
 
@@ -167,6 +147,32 @@ Write-Host "OpenCode parent environment: $env:EVERYTHING_SDK_DLL"
 Keep `$dllName`, `$source`, and `$dest` in that session for the validation steps
 below. The forward-slash environment value is intentional: OpenCode substitutes
 the value directly into raw JSON.
+
+For Codex, now create a configured skill copy with the resolved runner and SDK
+paths. Single-quoted PowerShell literals prevent `$` and backticks in valid
+paths from being evaluated. Refuse to overwrite an existing skill until it has
+been backed up and replacement is explicitly approved:
+
+```powershell
+$skillSource = (Resolve-Path ".\skills\everything\SKILL.md").Path
+$skillDest = Join-Path $env:USERPROFILE ".codex\skills\everything-mew\SKILL.md"
+if (Test-Path -LiteralPath $skillDest -PathType Leaf) {
+    throw "Back up the existing Codex skill and obtain approval before replacing it: $skillDest"
+}
+$runnerPlaceholder = 'C:\replace\with\absolute\path\to\everything-mew-once.exe'
+$sdkPlaceholder = 'C:\replace\with\absolute\path\to\EverythingSDK.dll'
+$runnerLiteral = $oneShotRunner.Replace("'", "''")
+$sdkLiteral = $dest.Replace("'", "''")
+$skill = Get-Content -LiteralPath $skillSource -Raw
+if ($skill.IndexOf($runnerPlaceholder, [StringComparison]::Ordinal) -lt 0 -or
+    $skill.IndexOf($sdkPlaceholder, [StringComparison]::Ordinal) -lt 0) {
+    throw "A one-shot installation placeholder was not found."
+}
+$skill = $skill.Replace($runnerPlaceholder, $runnerLiteral)
+$skill = $skill.Replace($sdkPlaceholder, $sdkLiteral)
+New-Item -ItemType Directory -Path (Split-Path -Parent $skillDest) -Force | Out-Null
+[IO.File]::WriteAllText($skillDest, $skill, [Text.UTF8Encoding]::new($false))
+```
 
 ## Configure OpenCode
 

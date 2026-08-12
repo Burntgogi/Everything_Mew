@@ -96,8 +96,8 @@ def test_repository_skill_is_codex_named_and_matches_supported_syntax_profile() 
     assert 'regex:"gr(a|e)y"' in skill
     assert "from-disk:" in skill
     assert "content*:" in skill
-    assert '$runner = "C:\\replace\\with\\absolute\\path\\to\\everything-mew-once.exe"' in skill
-    assert '$env:EVERYTHING_SDK_DLL = "C:\\replace\\with\\absolute\\path\\to\\EverythingSDK.dll"' in skill
+    assert "$runner = 'C:\\replace\\with\\absolute\\path\\to\\everything-mew-once.exe'" in skill
+    assert "$env:EVERYTHING_SDK_DLL = 'C:\\replace\\with\\absolute\\path\\to\\EverythingSDK.dll'" in skill
     assert "Test-Path -LiteralPath $env:EVERYTHING_SDK_DLL -PathType Leaf" in skill
     assert "Get-Command everything-mew-once" not in skill
     assert "schemaVersion = 1" in skill
