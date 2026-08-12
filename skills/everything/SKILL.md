@@ -42,8 +42,12 @@ and only then parse stdout:
 
 ```powershell
 $runner = "C:\replace\with\absolute\path\to\everything-mew-once.exe"
+$env:EVERYTHING_SDK_DLL = "C:\replace\with\absolute\path\to\EverythingSDK.dll"
 if (-not [IO.Path]::IsPathFullyQualified($runner) -or -not (Test-Path -LiteralPath $runner -PathType Leaf)) {
     throw "Configure the absolute Everything_Mew one-shot runner path."
+}
+if (-not [IO.Path]::IsPathFullyQualified($env:EVERYTHING_SDK_DLL) -or -not (Test-Path -LiteralPath $env:EVERYTHING_SDK_DLL -PathType Leaf)) {
+    throw "Configure the absolute Everything SDK DLL path."
 }
 $request = @{
     schemaVersion = 1

@@ -85,12 +85,15 @@ $skillDest = Join-Path $env:USERPROFILE ".codex\skills\everything-mew\SKILL.md"
 if (Test-Path -LiteralPath $skillDest -PathType Leaf) {
     throw "Back up the existing Codex skill and obtain approval before replacing it: $skillDest"
 }
-$placeholder = 'C:\replace\with\absolute\path\to\everything-mew-once.exe'
+$runnerPlaceholder = 'C:\replace\with\absolute\path\to\everything-mew-once.exe'
+$sdkPlaceholder = 'C:\replace\with\absolute\path\to\EverythingSDK.dll'
 $skill = Get-Content -LiteralPath $skillSource -Raw
-if ($skill.IndexOf($placeholder, [StringComparison]::Ordinal) -lt 0) {
-    throw "The one-shot runner placeholder was not found."
+if ($skill.IndexOf($runnerPlaceholder, [StringComparison]::Ordinal) -lt 0 -or
+    $skill.IndexOf($sdkPlaceholder, [StringComparison]::Ordinal) -lt 0) {
+    throw "A one-shot installation placeholder was not found."
 }
-$skill = $skill.Replace($placeholder, $oneShotRunner)
+$skill = $skill.Replace($runnerPlaceholder, $oneShotRunner)
+$skill = $skill.Replace($sdkPlaceholder, $dest)
 New-Item -ItemType Directory -Path (Split-Path -Parent $skillDest) -Force | Out-Null
 [IO.File]::WriteAllText($skillDest, $skill, [Text.UTF8Encoding]::new($false))
 ```
