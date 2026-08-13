@@ -8,7 +8,8 @@
 
 <p align="center">
   <a href="https://github.com/Burntgogi/Everything_Mew/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Burntgogi/Everything_Mew/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.2.0"><img alt="Release v0.2.0" src="https://img.shields.io/badge/release-v0.2.0-5865F2"></a>
+  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.2.0"><img alt="Stable v0.2.0" src="https://img.shields.io/badge/stable-v0.2.0-5865F2"></a>
+  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.3.0-rc.1"><img alt="Preview v0.3.0-rc.1" src="https://img.shields.io/badge/preview-v0.3.0--rc.1-D97706"></a>
   <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0078D4">
   <img alt="Python 3.11 through 3.14" src="https://img.shields.io/badge/Python-3.11--3.14-3776AB">
   <img alt="Read-only MCP tools" src="https://img.shields.io/badge/MCP-read--only-1F883D">
@@ -53,11 +54,11 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP on selected path
   code semantics.
 
 For Codex, the recommended path is the agent skill plus
-`everything-mew-once`. Each request starts one short-lived Python process,
+`everything-mew-once`. Each request starts one short-lived process tree,
 returns one result, and exits, so no Everything_Mew Python process remains while
 unused. The shared `Everything.exe` indexer continues running. OpenCode and
 manual MCP hosts can keep using `everything-mew-lite`; that compatibility mode
-may retain one Python process per host session. One-shot removes that idle
+may retain one server process tree per host session. One-shot removes that idle
 multiplication but does not claim a fixed peak-memory value during active
 searches.
 
@@ -78,12 +79,12 @@ interface. Download the SDK from the
 and keep the DLL in a trusted local support directory. The DLL is not bundled
 with this repository or its Python package.
 
-### 2. Install the stable release
+### 2. Install the 0.3 release candidate
 
 ```powershell
 git clone https://github.com/Burntgogi/Everything_Mew.git
 cd Everything_Mew
-git checkout v0.2.0
+git checkout v0.3.0-rc.1
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
 ```
@@ -314,19 +315,23 @@ py -m mypy --strict src tests
 py -m build
 ```
 
-The `v0.2.0` release passed these gates:
+The `v0.3.0-rc.1` candidate passed these local gates:
 
-- 407 pytest cases, Ruff, and strict mypy on local Python 3.11;
-- Windows GitHub Actions on Python 3.11 and 3.14;
-- installed-wheel lite MCP lifecycle without `PYTHONPATH`, FastAPI, or
-  FastMCP;
+- 422 pytest cases, Ruff, and strict mypy across 31 source and test files on
+  local Python 3.11;
+- isolated installed-wheel lite MCP and one-shot lifecycles without
+  `PYTHONPATH`, FastAPI, or FastMCP;
 - four-tool read-only contract checks for both lite and compatibility paths;
-- a live `size:>100mb` Everything SDK comparison with unique, size-sorted
-  results matching the independent SDK oracle for the first 100 entries;
+- ten sequential and six concurrent live SDK one-shot searches with no
+  surviving Everything_Mew process after completion;
+- an actual Windows reboot check confirming zero idle Everything_Mew Python
+  processes before and after the live calls;
 - source and distribution inspection for credentials, environment files, SDK
   binaries, caches, and machine-specific path evidence.
 
-See the [v0.2.0 release notes](docs/releases/v0.2.0.md) for the release-bound
+Windows GitHub Actions verifies Python 3.11 and 3.14 for pushed commits and
+pull requests. See the
+[v0.3.0-rc.1 release notes](docs/releases/v0.3.0-rc.1.md) for the candidate
 results and [CONTRIBUTING.md](CONTRIBUTING.md) for reproducible build and
 installed-wheel verification commands.
 
@@ -335,15 +340,16 @@ installed-wheel verification commands.
 | Release line | Role | Package version | Git tag |
 | --- | --- | --- | --- |
 | 0.1 | Original FastMCP-based baseline | `0.1.0` | `v0.1.0` |
-| 0.2 | Current stable low-standby release | `0.2.0` | `v0.2.0` |
+| 0.2 | Stable low-standby MCP release | `0.2.0` | `v0.2.0` |
+| 0.3 | Current one-shot prerelease | `0.3.0rc1` | `v0.3.0-rc.1` |
 
-Version 0.2 adds the direct lite stdio runtime, official asynchronous SDK query
-flow, stronger query and scope validation, reproducible packaging, and expanded
-CI and E2E verification while preserving the same four public tools.
+Version 0.3 adds bounded one-shot commands and makes them the default Codex
+workflow. The lite stdio server remains available for OpenCode and manual MCP
+compatibility, and all four public tools remain unchanged.
 
 Read the bilingual notes for [v0.1.0](docs/releases/v0.1.0.md),
-[v0.2.0](docs/releases/v0.2.0.md), and the reviewed
-[v0.2.0-rc.1](docs/releases/v0.2.0-rc.1.md) candidate. The complete bilingual
+[v0.2.0](docs/releases/v0.2.0.md), and the current
+[v0.3.0-rc.1](docs/releases/v0.3.0-rc.1.md) candidate. The complete bilingual
 history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Repository contents

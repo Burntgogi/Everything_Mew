@@ -8,7 +8,8 @@
 
 <p align="center">
   <a href="https://github.com/Burntgogi/Everything_Mew/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Burntgogi/Everything_Mew/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.2.0"><img alt="릴리스 v0.2.0" src="https://img.shields.io/badge/release-v0.2.0-5865F2"></a>
+  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.2.0"><img alt="안정판 v0.2.0" src="https://img.shields.io/badge/stable-v0.2.0-5865F2"></a>
+  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.3.0-rc.1"><img alt="시험판 v0.3.0-rc.1" src="https://img.shields.io/badge/preview-v0.3.0--rc.1-D97706"></a>
   <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0078D4">
   <img alt="Python 3.11부터 3.14" src="https://img.shields.io/badge/Python-3.11--3.14-3776AB">
   <img alt="읽기 전용 MCP 도구" src="https://img.shields.io/badge/MCP-read--only-1F883D">
@@ -52,11 +53,11 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP on selected path
 - 파일 내용과 코드 의미는 `read`, `grep`, `ast-grep`, LSP로 확인하세요.
 
 Codex에는 에이전트 스킬과 `everything-mew-once` 사용을 권장합니다. 요청할
-때마다 수명이 짧은 Python 프로세스 하나가 실행되어 결과 하나를 반환한 뒤
+때마다 수명이 짧은 프로세스 트리 하나가 실행되어 결과 하나를 반환한 뒤
 종료하므로 사용하지 않을 때는 Everything_Mew Python 프로세스가 남지 않습니다.
 공유 인덱서인 `Everything.exe`는 계속 실행됩니다. OpenCode와 수동 MCP
 호스트에서는 호환 모드인 `everything-mew-lite`를 계속 사용할 수 있으며,
-호스트 작업마다 Python 프로세스 하나가 유지될 수 있습니다. one-shot 방식은
+호스트 작업마다 서버 프로세스 트리 하나가 유지될 수 있습니다. one-shot 방식은
 이 유휴 중복을 없애지만 실제 검색 중 최대 메모리가 일정하다고 보장하지는
 않습니다.
 
@@ -77,12 +78,12 @@ Everything Lite는 필요한 IPC 인터페이스를 제공하지 않으므로 �
 SDK를 내려받아 신뢰할 수 있는 로컬 지원 디렉터리에 DLL을 보관하세요. 이
 저장소와 Python 패키지에는 DLL이 포함되어 있지 않습니다.
 
-### 2. 안정 릴리스를 설치하세요
+### 2. 0.3 릴리스 후보를 설치하세요
 
 ```powershell
 git clone https://github.com/Burntgogi/Everything_Mew.git
 cd Everything_Mew
-git checkout v0.2.0
+git checkout v0.3.0-rc.1
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
 ```
@@ -313,36 +314,41 @@ py -m mypy --strict src tests
 py -m build
 ```
 
-`v0.2.0` 릴리스는 다음 검증을 통과했습니다.
+`v0.3.0-rc.1` 후보는 다음 로컬 검증을 통과했습니다.
 
-- 로컬 Python 3.11에서 pytest 407건, Ruff, strict mypy를 통과했습니다.
-- Windows GitHub Actions에서 Python 3.11과 3.14를 검증했습니다.
-- 설치된 wheel로 `PYTHONPATH`, FastAPI, FastMCP 없이 lite MCP 수명 주기를
-  완료했습니다.
+- 로컬 Python 3.11에서 pytest 422건, Ruff, 소스·테스트 31개 파일에 대한
+  strict mypy를 통과했습니다.
+- 격리 설치한 wheel로 `PYTHONPATH`, FastAPI, FastMCP 없이 lite MCP와
+  one-shot 수명 주기를 완료했습니다.
 - lite 경로와 호환 경로에서 읽기 전용 도구 네 개의 계약을 확인했습니다.
-- 실제 `size:>100mb` Everything SDK 결과가 모두 고유하고 크기순이며, 첫
-  100개 항목이 독립 SDK 원본과 일치하는지 확인했습니다.
+- 실제 SDK one-shot 검색을 순차 10회, 동시 6회 수행한 뒤 남은
+  Everything_Mew 프로세스가 없음을 확인했습니다.
+- Windows를 실제로 재부팅한 뒤 실호출 전후 유휴 Everything_Mew Python
+  프로세스가 0개임을 확인했습니다.
 - 소스와 배포 파일에 자격 증명, 환경 파일, SDK 바이너리, 캐시, 컴퓨터별 경로
   증거가 없는지 검사했습니다.
 
-릴리스에 귀속된 결과는 [v0.2.0 릴리스 노트](docs/releases/v0.2.0.md)를
-참조하세요. 재현 가능한 빌드와 설치 wheel 검증 명령은
-[CONTRIBUTING.md](CONTRIBUTING.md)에서 확인하세요.
+푸시와 pull request에는 Windows GitHub Actions가 Python 3.11과 3.14 검증을
+수행합니다. 후보 검증 결과는
+[v0.3.0-rc.1 릴리스 노트](docs/releases/v0.3.0-rc.1.md)를 참조하세요. 재현
+가능한 빌드와 설치 wheel 검증 명령은 [CONTRIBUTING.md](CONTRIBUTING.md)에서
+확인하세요.
 
 ## 릴리스 이력
 
 | 릴리스 계열 | 역할 | 패키지 버전 | Git 태그 |
 | --- | --- | --- | --- |
 | 0.1 | 기존 FastMCP 기반 기준판 | `0.1.0` | `v0.1.0` |
-| 0.2 | 현재 안정 저대기 부담 릴리스 | `0.2.0` | `v0.2.0` |
+| 0.2 | 안정 저대기 부담 MCP 릴리스 | `0.2.0` | `v0.2.0` |
+| 0.3 | 현재 one-shot 시험판 | `0.3.0rc1` | `v0.3.0-rc.1` |
 
-0.2는 같은 공개 도구 네 개를 유지하면서 직접 구현한 lite stdio 런타임, 공식
-비동기 SDK 쿼리 흐름, 강화된 쿼리와 범위 검증, 재현 가능한 패키징, 확장된 CI와
-E2E 검증을 추가했습니다.
+0.3은 제한형 one-shot 명령을 추가하고 이를 Codex 기본 사용 흐름으로
+변경했습니다. OpenCode와 수동 MCP 호환용 lite stdio 서버를 유지하며 공개 도구
+네 개의 계약도 그대로 유지합니다.
 
 한영 릴리스 노트는 [v0.1.0](docs/releases/v0.1.0.md),
-[v0.2.0](docs/releases/v0.2.0.md), 검토된
-[v0.2.0-rc.1](docs/releases/v0.2.0-rc.1.md) 후보 문서에서 확인하세요. 전체 한영
+[v0.2.0](docs/releases/v0.2.0.md), 현재
+[v0.3.0-rc.1](docs/releases/v0.3.0-rc.1.md) 후보 문서에서 확인하세요. 전체 한영
 이력은 [CHANGELOG.md](CHANGELOG.md)를 참조하세요.
 
 ## 저장소 구성

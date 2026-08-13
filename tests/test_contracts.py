@@ -56,13 +56,13 @@ def test_runtime_entrypoints_and_host_defaults_are_documented() -> None:
     assert "trusted local Everything binaries" in english_readme
 
 
-def test_final_release_metadata_and_notes_are_consistent() -> None:
+def test_release_candidate_metadata_and_notes_are_consistent() -> None:
     root = Path(__file__).resolve().parents[1]
 
     with (root / "pyproject.toml").open("rb") as pyproject_file:
         pyproject = tomllib.load(pyproject_file)
 
-    assert pyproject["project"]["version"] == "0.2.0"
+    assert pyproject["project"]["version"] == "0.3.0rc1"
     sdist_includes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
     assert "/.gitattributes" in sdist_includes
     assert "/docs/releases/*.md" in sdist_includes
@@ -71,9 +71,9 @@ def test_final_release_metadata_and_notes_are_consistent() -> None:
     assert "* text=auto eol=lf" in attributes
 
     expected_release_references = {
-        "README.md": ("v0.1.0", "v0.2.0"),
-        "README.ko.md": ("v0.1.0", "v0.2.0"),
-        "CHANGELOG.md": ("[0.1.0]", "[0.2.0]"),
+        "README.md": ("v0.2.0", "v0.3.0-rc.1"),
+        "README.ko.md": ("v0.2.0", "v0.3.0-rc.1"),
+        "CHANGELOG.md": ("[0.2.0]", "[0.3.0-rc.1]"),
         "SECURITY.md": ("`0.2.x`", "Current supported / 현재 지원"),
     }
     for relative_path, references in expected_release_references.items():
@@ -81,7 +81,12 @@ def test_final_release_metadata_and_notes_are_consistent() -> None:
         for reference in references:
             assert reference in document
 
-    for release_note in ("v0.1.0.md", "v0.2.0-rc.1.md", "v0.2.0.md"):
+    for release_note in (
+        "v0.1.0.md",
+        "v0.2.0-rc.1.md",
+        "v0.2.0.md",
+        "v0.3.0-rc.1.md",
+    ):
         assert (root / "docs" / "releases" / release_note).is_file()
 
 

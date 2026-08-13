@@ -4,12 +4,27 @@ All notable release changes are documented here. / 주요 릴리스 변경 사�
 
 ## [Unreleased]
 
+## [0.3.0-rc.1] - 2026-08-13
+
+The Python package version is `0.3.0rc1` and its Git tag is
+`v0.3.0-rc.1`. This prerelease keeps the four public read-only tool contracts
+while changing the recommended Codex execution model from a session-scoped MCP
+server to a bounded one-shot process tree.
+
+Python 패키지 버전은 `0.3.0rc1`, Git 태그는 `v0.3.0-rc.1`입니다. 이 시험판은
+공개 읽기 전용 도구 네 개의 계약을 유지하면서 Codex 권장 실행 방식을 세션 단위
+MCP 서버에서 제한형 one-shot 프로세스 트리로 변경합니다.
+
 ### English
 
 - Add bounded `everything-mew-once` and `everything-mcp-once` commands that
   execute one existing read-only tool request and exit without FastMCP.
+- Limit each request to one 65,536-byte JSON envelope and use stable exit codes
+  for success, published tool errors, and invalid invocations.
 - Make the Codex skill use the one-shot command by default so no
   Everything_Mew Python process remains while unused.
+- Pin and validate absolute runner and SDK DLL paths in the installed Codex
+  skill, with safe PowerShell literal escaping during installation.
 - Keep `everything-mew-lite` for OpenCode and manual MCP compatibility, and
   document that a disabled MCP is unavailable rather than automatically asleep.
 
@@ -18,8 +33,12 @@ All notable release changes are documented here. / 주요 릴리스 변경 사�
 - 기존 읽기 전용 도구 요청 하나를 실행한 뒤 종료하는 제한형
   `everything-mew-once`와 `everything-mcp-once` 명령을 FastMCP 없이
   추가합니다.
+- 요청 하나를 65,536바이트 JSON 봉투 하나로 제한하고 성공, 공개된 도구 오류,
+  잘못된 호출을 안정적인 종료 코드로 구분합니다.
 - 사용하지 않을 때 Everything_Mew Python 프로세스가 남지 않도록 Codex
   스킬의 기본 실행 경로를 one-shot 명령으로 변경합니다.
+- 설치된 Codex 스킬에 실행기와 SDK DLL의 절대 경로를 고정·검증하고 설치 중
+  PowerShell 리터럴을 안전하게 이스케이프합니다.
 - OpenCode와 수동 MCP 호환용 `everything-mew-lite`를 유지하고, 비활성 MCP는
   자동 수면 상태가 아니라 사용할 수 없는 상태임을 문서화합니다.
 
@@ -158,6 +177,7 @@ Baseline commit: `ffa5eaebaad5524c0bb35a90cf983e66cb9b452d`.
 - Everything SDK 설치, 읽기 전용 경계, 경로 우선 후보 탐색 흐름을
   문서화했습니다.
 
+[0.3.0-rc.1]: https://github.com/Burntgogi/Everything_Mew/compare/v0.2.0...v0.3.0-rc.1
 [0.2.0]: https://github.com/Burntgogi/Everything_Mew/compare/v0.1.0...v0.2.0
 [0.2.0-rc.1]: https://github.com/Burntgogi/Everything_Mew/compare/v0.1.0...v0.2.0-rc.1
 [0.1.0]: https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.1.0
