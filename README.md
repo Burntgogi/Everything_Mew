@@ -8,8 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/Burntgogi/Everything_Mew/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Burntgogi/Everything_Mew/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.2.0"><img alt="Stable v0.2.0" src="https://img.shields.io/badge/stable-v0.2.0-5865F2"></a>
-  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.3.0-rc.1"><img alt="Preview v0.3.0-rc.1" src="https://img.shields.io/badge/preview-v0.3.0--rc.1-D97706"></a>
+  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.3.0"><img alt="Stable v0.3.0" src="https://img.shields.io/badge/stable-v0.3.0-5865F2"></a>
   <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0078D4">
   <img alt="Python 3.11 through 3.14" src="https://img.shields.io/badge/Python-3.11--3.14-3776AB">
   <img alt="Read-only MCP tools" src="https://img.shields.io/badge/MCP-read--only-1F883D">
@@ -79,12 +78,12 @@ interface. Download the SDK from the
 and keep the DLL in a trusted local support directory. The DLL is not bundled
 with this repository or its Python package.
 
-### 2. Install the 0.3 release candidate
+### 2. Install the stable release
 
 ```powershell
 git clone https://github.com/Burntgogi/Everything_Mew.git
 cd Everything_Mew
-git checkout v0.3.0-rc.1
+git checkout v0.3.0
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
 ```
@@ -315,7 +314,7 @@ py -m mypy --strict src tests
 py -m build
 ```
 
-The `v0.3.0-rc.1` candidate passed these local gates:
+The `v0.3.0` release passed these local gates:
 
 - 422 pytest cases, Ruff, and strict mypy across 31 source and test files on
   local Python 3.11;
@@ -331,7 +330,7 @@ The `v0.3.0-rc.1` candidate passed these local gates:
 
 Windows GitHub Actions verifies Python 3.11 and 3.14 for pushed commits and
 pull requests. See the
-[v0.3.0-rc.1 release notes](docs/releases/v0.3.0-rc.1.md) for the candidate
+[v0.3.0 release notes](docs/releases/v0.3.0.md) for the final
 results and [CONTRIBUTING.md](CONTRIBUTING.md) for reproducible build and
 installed-wheel verification commands.
 
@@ -341,7 +340,7 @@ installed-wheel verification commands.
 | --- | --- | --- | --- |
 | 0.1 | Original FastMCP-based baseline | `0.1.0` | `v0.1.0` |
 | 0.2 | Stable low-standby MCP release | `0.2.0` | `v0.2.0` |
-| 0.3 | Current one-shot prerelease | `0.3.0rc1` | `v0.3.0-rc.1` |
+| 0.3 | Current stable one-shot release | `0.3.0` | `v0.3.0` |
 
 Version 0.3 adds bounded one-shot commands and makes them the default Codex
 workflow. The lite stdio server remains available for OpenCode and manual MCP
@@ -349,7 +348,7 @@ compatibility, and all four public tools remain unchanged.
 
 Read the bilingual notes for [v0.1.0](docs/releases/v0.1.0.md),
 [v0.2.0](docs/releases/v0.2.0.md), and the current
-[v0.3.0-rc.1](docs/releases/v0.3.0-rc.1.md) candidate. The complete bilingual
+[v0.3.0](docs/releases/v0.3.0.md) release. The complete bilingual
 history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Repository contents

@@ -4,6 +4,28 @@ All notable release changes are documented here. / 주요 릴리스 변경 사�
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-13
+
+The final package version is `0.3.0` and its Git tag is `v0.3.0`. It promotes
+`v0.3.0-rc.1` without changing the four public read-only tool contracts.
+
+최종 패키지 버전은 `0.3.0`, Git 태그는 `v0.3.0`입니다. 공개 읽기 전용 도구
+네 개의 계약을 변경하지 않고 `v0.3.0-rc.1` 후보를 안정판으로 승격했습니다.
+
+### English
+
+- Make the bounded one-shot runner the stable recommended Codex workflow.
+- Retain the lite stdio and optional FastMCP compatibility paths.
+- Promote the candidate after local, installed-wheel, live SDK, reboot, and
+  Windows Python 3.11/3.14 CI verification.
+
+### 한국어
+
+- 제한형 one-shot 실행기를 안정판 Codex 권장 흐름으로 확정했습니다.
+- lite stdio와 선택적 FastMCP 호환 경로를 유지합니다.
+- 로컬, 설치 wheel, 실제 SDK, 재부팅, Windows Python 3.11/3.14 CI 검증을
+  통과한 후보를 안정판으로 승격했습니다.
+
 ## [0.3.0-rc.1] - 2026-08-13
 
 The Python package version is `0.3.0rc1` and its Git tag is
@@ -177,6 +199,7 @@ Baseline commit: `ffa5eaebaad5524c0bb35a90cf983e66cb9b452d`.
 - Everything SDK 설치, 읽기 전용 경계, 경로 우선 후보 탐색 흐름을
   문서화했습니다.
 
+[0.3.0]: https://github.com/Burntgogi/Everything_Mew/compare/v0.3.0-rc.1...v0.3.0
 [0.3.0-rc.1]: https://github.com/Burntgogi/Everything_Mew/compare/v0.2.0...v0.3.0-rc.1
 [0.2.0]: https://github.com/Burntgogi/Everything_Mew/compare/v0.1.0...v0.2.0
 [0.2.0-rc.1]: https://github.com/Burntgogi/Everything_Mew/compare/v0.1.0...v0.2.0-rc.1

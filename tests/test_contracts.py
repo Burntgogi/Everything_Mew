@@ -56,13 +56,13 @@ def test_runtime_entrypoints_and_host_defaults_are_documented() -> None:
     assert "trusted local Everything binaries" in english_readme
 
 
-def test_release_candidate_metadata_and_notes_are_consistent() -> None:
+def test_final_release_metadata_and_notes_are_consistent() -> None:
     root = Path(__file__).resolve().parents[1]
 
     with (root / "pyproject.toml").open("rb") as pyproject_file:
         pyproject = tomllib.load(pyproject_file)
 
-    assert pyproject["project"]["version"] == "0.3.0rc1"
+    assert pyproject["project"]["version"] == "0.3.0"
     assert "ruff>=0.15,<0.16" in pyproject["project"]["optional-dependencies"]["dev"]
     sdist_includes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
     assert "/.gitattributes" in sdist_includes
@@ -72,10 +72,10 @@ def test_release_candidate_metadata_and_notes_are_consistent() -> None:
     assert "* text=auto eol=lf" in attributes
 
     expected_release_references = {
-        "README.md": ("v0.2.0", "v0.3.0-rc.1"),
-        "README.ko.md": ("v0.2.0", "v0.3.0-rc.1"),
-        "CHANGELOG.md": ("[0.2.0]", "[0.3.0-rc.1]"),
-        "SECURITY.md": ("`0.2.x`", "Current supported / 현재 지원"),
+        "README.md": ("v0.3.0", "Current stable one-shot release"),
+        "README.ko.md": ("v0.3.0", "현재 안정 one-shot 릴리스"),
+        "CHANGELOG.md": ("[0.3.0]", "[0.3.0-rc.1]"),
+        "SECURITY.md": ("`0.3.x`", "Current supported / 현재 지원"),
     }
     for relative_path, references in expected_release_references.items():
         document = (root / relative_path).read_text(encoding="utf-8")
@@ -87,6 +87,7 @@ def test_release_candidate_metadata_and_notes_are_consistent() -> None:
         "v0.2.0-rc.1.md",
         "v0.2.0.md",
         "v0.3.0-rc.1.md",
+        "v0.3.0.md",
     ):
         assert (root / "docs" / "releases" / release_note).is_file()
 
