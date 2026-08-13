@@ -29,7 +29,7 @@ Issues = "https://github.com/Burntgogi/Everything_Mew/issues"
 [project.optional-dependencies]
 server = ["fastmcp>=2"]
 test = ["pytest>=8"]
-dev = ["build>=1.2", "pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+dev = ["build>=1.2", "pytest>=8", "ruff>=0.15,<0.16", "mypy>=1.11"]
 
 [project.scripts]
 everything-mew = "everything_mcp.__main__:main"

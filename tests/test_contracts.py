@@ -63,6 +63,7 @@ def test_release_candidate_metadata_and_notes_are_consistent() -> None:
         pyproject = tomllib.load(pyproject_file)
 
     assert pyproject["project"]["version"] == "0.3.0rc1"
+    assert "ruff>=0.15,<0.16" in pyproject["project"]["optional-dependencies"]["dev"]
     sdist_includes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
     assert "/.gitattributes" in sdist_includes
     assert "/docs/releases/*.md" in sdist_includes
