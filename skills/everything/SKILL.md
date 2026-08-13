@@ -34,6 +34,41 @@ Use this skill when a user needs to find candidate files or folders on Windows b
 - Changing Everything indexes or configuration.
 - Enabling HTTP automatically.
 
+## Execution contract
+
+In Codex, invoke the installed one-shot runner once per tool request. Resolve
+the runner to an absolute path, pass one JSON object on stdin, wait for exit,
+and only then parse stdout:
+
+```powershell
+$runner = 'C:\replace\with\absolute\path\to\everything-mew-once.exe'
+$env:EVERYTHING_SDK_DLL = 'C:\replace\with\absolute\path\to\EverythingSDK.dll'
+if (-not [IO.Path]::IsPathFullyQualified($runner) -or -not (Test-Path -LiteralPath $runner -PathType Leaf)) {
+    throw "Configure the absolute Everything_Mew one-shot runner path."
+}
+if (-not [IO.Path]::IsPathFullyQualified($env:EVERYTHING_SDK_DLL) -or -not (Test-Path -LiteralPath $env:EVERYTHING_SDK_DLL -PathType Leaf)) {
+    throw "Configure the absolute Everything SDK DLL path."
+}
+$request = @{
+    schemaVersion = 1
+    tool = "everything_search"
+    arguments = @{
+        query = "ext:py"
+        scope = "C:\Work\project"
+        limit = 10
+        metadata = $false
+    }
+} | ConvertTo-Json -Compress -Depth 4
+$resultJson = $request | & $runner
+if ($LASTEXITCODE -notin 0, 1) { throw "Everything_Mew one-shot invocation failed." }
+$result = $resultJson | ConvertFrom-Json
+```
+
+Never evaluate a path or request as shell code. Exit `0` publishes success,
+exit `1` publishes a tool error, and exit `2` means stdout is not trustworthy.
+Use normal filesystem tools to read any selected path. OpenCode or a manual MCP
+host may continue to use `everything-mew-lite` as a compatibility server.
+
 ## Default workflow
 
 1. Decide whether the task is metadata discovery. If it is content or code understanding, use `read`, `grep`, `ast-grep`, or LSP instead.
@@ -96,7 +131,7 @@ If a user asks for cleanup or mutation, explain that this skill can only locate 
 
 ## Backend expectations
 
-The local MCP should use backend adapters in this order:
+The local runtime should use backend adapters in this order:
 
 1. SDK/IPC as the primary local backend.
 2. ES CLI as a fallback when `es.exe` is available.

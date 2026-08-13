@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "everything-mew"
-version = "0.2.0"
+version = "0.3.0rc1"
 description = "Everything_Mew: a read-only MCP server that helps AI agents search with Everything"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -29,13 +29,15 @@ Issues = "https://github.com/Burntgogi/Everything_Mew/issues"
 [project.optional-dependencies]
 server = ["fastmcp>=2"]
 test = ["pytest>=8"]
-dev = ["build>=1.2", "pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+dev = ["build>=1.2", "pytest>=8", "ruff>=0.15,<0.16", "mypy>=1.11"]
 
 [project.scripts]
 everything-mew = "everything_mcp.__main__:main"
 everything-mcp = "everything_mcp.__main__:main"
 everything-mew-lite = "everything_mcp.lite_stdio:main"
 everything-mcp-lite = "everything_mcp.lite_stdio:main"
+everything-mew-once = "everything_mcp.oneshot:main"
+everything-mcp-once = "everything_mcp.oneshot:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/everything_mcp"]

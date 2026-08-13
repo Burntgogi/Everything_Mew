@@ -34,8 +34,9 @@ The MCP is SDK-first. `es.exe` is only a fallback when SDK/IPC is unavailable.
 
 ## Recommended Install Strategy
 
-Create a project-local environment and install the runtime-only lite path. This
-is the default for always-enabled MCP hosts and does not install FastMCP:
+Create a project-local environment and install the dependency-free runtime.
+Codex should use the one-shot command; always-enabled OpenCode or manual MCP
+hosts can use the lite path. Neither requires FastMCP:
 
 ```powershell
 py -m venv .venv
@@ -72,6 +73,47 @@ Set the official OpenCode environment substitution in global config:
 OpenCode, set that host variable to the trusted DLL path. Use forward slashes in
 the value because OpenCode substitutes it directly into raw JSON. The agent
 procedure below derives the selected 32/64-bit DLL and normalizes its path.
+
+## Codex One-Shot Use
+
+Set `EVERYTHING_SDK_DLL` in the environment inherited by Codex. Resolve the
+installed runner to an absolute path and send one UTF-8 JSON request per
+process:
+
+```powershell
+$scriptsDir = Split-Path -Parent $python
+$runner = (Resolve-Path (Join-Path $scriptsDir "everything-mew-once.exe")).Path
+$request = @{
+    schemaVersion = 1
+    tool = "everything_status"
+    arguments = @{}
+} | ConvertTo-Json -Compress -Depth 4
+$resultJson = $request | & $runner
+$exitCode = $LASTEXITCODE
+if ($exitCode -notin 0, 1) {
+    throw "Everything_Mew one-shot invocation failed."
+}
+$resultJson | ConvertFrom-Json
+```
+
+Keep any previous Codex MCP registration only as a disabled rollback path:
+
+```toml
+[mcp_servers.everything-mew]
+command = "everything-mew-lite"
+args = []
+enabled = false
+
+[mcp_servers.everything-mew.env]
+EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+```
+
+`enabled = false` makes the MCP unavailable and does not add automatic sleep or
+wake behavior. Fully restart Codex after changing it. Existing MCP servers exit
+when their owning host closes. The one-shot path leaves no Everything_Mew
+Python process while unused; `Everything.exe` remains running as the shared
+indexer. This removes idle process multiplication without promising a fixed
+active-search peak memory value.
 
 Alternative admin install:
 
@@ -174,8 +216,9 @@ fallback:
    opencode
    ```
 
-8. Validate the lite MCP lifecycle without importing FastMCP, then make
-   read-only tool calls:
+8. Validate `everything-mew-once` as shown above. For OpenCode or manual MCP
+   compatibility, validate the lite lifecycle without importing FastMCP, then
+   make read-only tool calls:
 
    ```python
    from everything_mcp.lite_stdio import LiteSession, handle_message

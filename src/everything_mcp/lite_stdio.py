@@ -105,7 +105,7 @@ def handle_message(message: dict[str, Any], session: LiteSession | None = None) 
             return _error(request_id, -32602, "Invalid params: tool arguments must be an object.")
         if name not in TOOL_SPEC_BY_NAME:
             return _error(request_id, -32602, f"Unknown tool: {name}")
-        return _result(request_id, _call_tool_result(name, cast(dict[str, Any], arguments)))
+        return _result(request_id, call_tool_result(name, cast(dict[str, Any], arguments)))
     return _error(request_id, -32601, f"Method not found: {method}")
 
 
@@ -166,7 +166,7 @@ def _initialize_params_error(params: dict[str, Any]) -> str | None:
     return None
 
 
-def _call_tool_result(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+def call_tool_result(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     spec = TOOL_SPEC_BY_NAME[name]
     try:
         validated_arguments = validate_tool_arguments(spec, arguments)

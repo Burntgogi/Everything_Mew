@@ -26,31 +26,44 @@ def test_path_first_default_and_metadata_opt_in() -> None:
     ]
 
 
-def test_readme_and_opencode_prefer_release_console_entrypoint() -> None:
+def test_runtime_entrypoints_and_host_defaults_are_documented() -> None:
     root = Path(__file__).resolve().parents[1]
 
     opencode = json.loads((root / "opencode.example.json").read_text(encoding="utf-8"))
     assert opencode["mcp"]["everything-mew"]["command"] == ["everything-mew-lite"]
-    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'everything-mew = "everything_mcp.__main__:main"' in pyproject
-    assert 'everything-mew-lite = "everything_mcp.lite_stdio:main"' in pyproject
-    readme = (root / "README.md").read_text(encoding="utf-8")
-    assert "Everything_Mew" in readme
-    assert 'py -m pip install -e ".[server]"' in readme
-    assert "Contributor notes" in readme
-    assert "trusted local Everything binaries" in readme
-    assert '"command": ["everything-mew-lite"]' in readme
-    korean_readme = (root / "README.ko.md").read_text(encoding="utf-8")
-    assert '"command": ["everything-mew-lite"]' in korean_readme
+    with (root / "pyproject.toml").open("rb") as pyproject_file:
+        scripts = tomllib.load(pyproject_file)["project"]["scripts"]
+    assert scripts == {
+        "everything-mew": "everything_mcp.__main__:main",
+        "everything-mcp": "everything_mcp.__main__:main",
+        "everything-mew-lite": "everything_mcp.lite_stdio:main",
+        "everything-mcp-lite": "everything_mcp.lite_stdio:main",
+        "everything-mew-once": "everything_mcp.oneshot:main",
+        "everything-mcp-once": "everything_mcp.oneshot:main",
+    }
+
+    for relative_path in ("README.md", "README.ko.md"):
+        readme = (root / relative_path).read_text(encoding="utf-8")
+        assert "Everything_Mew" in readme
+        assert "everything-mew-once" in readme
+        assert "schemaVersion" in readme
+        assert "enabled = false" in readme
+        assert '"command": ["everything-mew-lite"]' in readme
+
+    english_readme = (root / "README.md").read_text(encoding="utf-8")
+    assert 'py -m pip install -e ".[server]"' in english_readme
+    assert "Contributor notes" in english_readme
+    assert "trusted local Everything binaries" in english_readme
 
 
-def test_final_release_metadata_and_notes_are_consistent() -> None:
+def test_release_candidate_metadata_and_notes_are_consistent() -> None:
     root = Path(__file__).resolve().parents[1]
 
     with (root / "pyproject.toml").open("rb") as pyproject_file:
         pyproject = tomllib.load(pyproject_file)
 
-    assert pyproject["project"]["version"] == "0.2.0"
+    assert pyproject["project"]["version"] == "0.3.0rc1"
+    assert "ruff>=0.15,<0.16" in pyproject["project"]["optional-dependencies"]["dev"]
     sdist_includes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
     assert "/.gitattributes" in sdist_includes
     assert "/docs/releases/*.md" in sdist_includes
@@ -59,9 +72,9 @@ def test_final_release_metadata_and_notes_are_consistent() -> None:
     assert "* text=auto eol=lf" in attributes
 
     expected_release_references = {
-        "README.md": ("v0.1.0", "v0.2.0"),
-        "README.ko.md": ("v0.1.0", "v0.2.0"),
-        "CHANGELOG.md": ("[0.1.0]", "[0.2.0]"),
+        "README.md": ("v0.2.0", "v0.3.0-rc.1"),
+        "README.ko.md": ("v0.2.0", "v0.3.0-rc.1"),
+        "CHANGELOG.md": ("[0.2.0]", "[0.3.0-rc.1]"),
         "SECURITY.md": ("`0.2.x`", "Current supported / 현재 지원"),
     }
     for relative_path, references in expected_release_references.items():
@@ -69,7 +82,12 @@ def test_final_release_metadata_and_notes_are_consistent() -> None:
         for reference in references:
             assert reference in document
 
-    for release_note in ("v0.1.0.md", "v0.2.0-rc.1.md", "v0.2.0.md"):
+    for release_note in (
+        "v0.1.0.md",
+        "v0.2.0-rc.1.md",
+        "v0.2.0.md",
+        "v0.3.0-rc.1.md",
+    ):
         assert (root / "docs" / "releases" / release_note).is_file()
 
 
@@ -84,6 +102,14 @@ def test_repository_skill_is_codex_named_and_matches_supported_syntax_profile() 
     assert 'regex:"gr(a|e)y"' in skill
     assert "from-disk:" in skill
     assert "content*:" in skill
+    assert "$runner = 'C:\\replace\\with\\absolute\\path\\to\\everything-mew-once.exe'" in skill
+    assert "$env:EVERYTHING_SDK_DLL = 'C:\\replace\\with\\absolute\\path\\to\\EverythingSDK.dll'" in skill
+    assert "Test-Path -LiteralPath $env:EVERYTHING_SDK_DLL -PathType Leaf" in skill
+    assert "Get-Command everything-mew-once" not in skill
+    assert "schemaVersion = 1" in skill
+    assert "ConvertTo-Json -Compress -Depth 4" in skill
+    assert "$LASTEXITCODE -notin 0, 1" in skill
+    assert "Invoke-Expression" not in skill
 
 
 def test_release_documents_cover_scope_count_and_syntax_hardening() -> None:

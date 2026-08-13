@@ -135,7 +135,24 @@ jobs:
               "everything_search",
               "everything_syntax_help",
           }, tool_names
-          print(f"wheel smoke passed: version={server_version}, tools={len(tool_names)}")
+
+          oneshot_entrypoint = Path(sys.executable).with_name("everything-mew-once.exe")
+          assert oneshot_entrypoint.is_file(), oneshot_entrypoint
+          oneshot = subprocess.run(
+              [str(oneshot_entrypoint)],
+              input=json.dumps({
+                  "schemaVersion": 1,
+                  "tool": "everything_syntax_help",
+                  "arguments": {"topic": "filters"},
+              }),
+              text=True,
+              capture_output=True,
+              check=True,
+              env=environment,
+          )
+          assert not oneshot.stderr, oneshot.stderr
+          assert json.loads(oneshot.stdout)["isError"] is False
+          print(f"wheel smoke passed: version={server_version}, tools={len(tool_names)}, oneshot=ok")
           '@ | & .\.wheel-smoke\Scripts\python.exe -
           if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
