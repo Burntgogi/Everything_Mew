@@ -28,8 +28,9 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18")
 DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 SERVER_INSTRUCTIONS = (
     "Everything_Mew is a read-only Windows file and folder discovery server backed by Everything. "
-    "Use everything_count before broad searches, add path/extension/date/size filters for large result sets, "
-    "and use normal filesystem tools to read or modify files after locating paths."
+    "Pass a scope inside host-configured allowed roots to search or count, then add path/extension/date/size filters "
+    "for large result sets. "
+    "Use normal filesystem tools to read or modify files after locating paths."
 )
 ToolPayload = dict[str, Any] | str
 ToolFunc = Callable[..., ToolPayload]

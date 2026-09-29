@@ -188,7 +188,8 @@ existing MCP entries, and add this valid local MCP shape:
       "enabled": true,
       "timeout": 20000,
       "environment": {
-        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}",
+        "EVERYTHING_MCP_ALLOWED_ROOTS": "{env:EVERYTHING_MCP_ALLOWED_ROOTS}"
       }
     }
   }
@@ -196,7 +197,8 @@ existing MCP entries, and add this valid local MCP shape:
 ```
 
 `{env:EVERYTHING_SDK_DLL}` is OpenCode's literal environment placeholder. Set
-`$env:EVERYTHING_SDK_DLL` in the parent PowerShell as shown above, then launch
+`$env:EVERYTHING_SDK_DLL` in the parent PowerShell as shown above. Also set
+`$env:EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Path\\to\\project"]'`, then launch
 OpenCode from that same shell:
 
 ```powershell
@@ -219,6 +221,7 @@ after the process exits:
 
 ```powershell
 $env:EVERYTHING_SDK_DLL = $dest.Replace("\", "/")
+$env:EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 $runner = $oneShotRunner
 $request = @{
     schemaVersion = 1
@@ -256,6 +259,7 @@ enabled_tools = ["everything_status", "everything_count", "everything_search", "
 
 [mcp_servers.everything-mew.env]
 EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 ```
 
 `enabled = false` makes that MCP unavailable. It does not implement automatic
@@ -277,6 +281,11 @@ per host session.
   uses this first.
 - `EVERYTHING_ES_EXE`: trusted path to `es.exe` only when the optional ES CLI
   fallback is intentionally installed.
+- `EVERYTHING_MCP_ALLOWED_ROOTS`: JSON array of bounded absolute directories.
+  Search and count calls require a scope inside one of these roots.
+- `EVERYTHING_MCP_ALLOW_METADATA=1`: optionally permit metadata responses.
+- `EVERYTHING_MCP_ALLOW_UNSCOPED=1`: explicitly restore unrestricted index
+  search instead of configuring allowed roots.
 
 ## Validation Steps
 
@@ -347,7 +356,7 @@ from everything_mcp.server import everything_status, everything_count, everythin
 
 print(everything_status())
 print(everything_count("ext:md", scope=r"C:\Path\to\project"))
-print(everything_search("ext:md", scope=r"C:\Path\to\project", limit=5, metadata=True))
+print(everything_search("ext:md", scope=r"C:\Path\to\project", limit=5))
 '@ | & $python -
 ```
 

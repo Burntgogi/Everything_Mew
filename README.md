@@ -97,6 +97,7 @@ resolve it to an absolute path before each invocation:
 
 ```powershell
 $env:EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+$env:EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 $runner = (Resolve-Path ".\.venv\Scripts\everything-mew-once.exe").Path
 $request = @{
     schemaVersion = 1
@@ -123,6 +124,7 @@ enabled_tools = ["everything_status", "everything_count", "everything_search", "
 
 [mcp_servers.everything-mew.env]
 EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 ```
 
 `enabled = false` makes the MCP unavailable; it does not sleep and wake on
@@ -142,7 +144,8 @@ environment placeholder:
       "command": ["everything-mew-lite"],
       "enabled": true,
       "environment": {
-        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}",
+        "EVERYTHING_MCP_ALLOWED_ROOTS": "{env:EVERYTHING_MCP_ALLOWED_ROOTS}"
       }
     }
   }
@@ -207,14 +210,31 @@ Official references:
 
 ## Query compatibility and safety
 
+Set `EVERYTHING_MCP_ALLOWED_ROOTS` to a JSON array of absolute, bounded Windows
+directories before calling `everything_count` or `everything_search`. For
+example, `['C:\\Work\\project']` is **not** JSON; use
+`'["C:\\Work\\project"]'` as the PowerShell or TOML literal value. Every
+search and count request must supply a `scope` inside one of those directories.
+With no allowed roots configured, searches and counts are denied before the
+Everything backend runs. A request for `metadata=true` also requires the
+trusted process setting `EVERYTHING_MCP_ALLOW_METADATA=1`.
+
+Operators who intentionally need the previous unrestricted index behavior can
+set `EVERYTHING_MCP_ALLOW_UNSCOPED=1` instead of allowed roots. This mode may
+search any indexed path and cannot be combined with `EVERYTHING_MCP_ALLOWED_ROOTS`.
+The existing broad-query guard remains active in either mode. Set these values
+in the host or one-shot process environment, never in tool arguments. Restart a
+persistent MCP host after changing them.
+
 Everything 1.4.1 core syntax is the default compatibility profile. Check
 `everything_status` before using features documented only for Everything 1.5;
 the running Everything process, not the Python adapter, interprets the query.
 
 Pass a bounded absolute directory through the `scope` argument. For example,
 `scope="C:\Work\project"` is composed as the exact recursive folder term
-`"C:\Work\project\"`, and returned paths are checked against that normalized
-boundary. A partial query such as `path:"C:\Work\project"` can also match a
+`"C:\Work\project\"`; the query expression is grouped under that term and
+returned paths are checked against the normalized boundary. A partial query
+such as `path:"C:\Work\project"` can also match a
 prefix sibling such as `C:\Work\project-backup` and is not equivalent.
 
 Broad-query validation parses quotes, negation, grouping, and every OR branch.

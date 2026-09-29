@@ -65,7 +65,7 @@ TOOL_SPECS: Final = (
     ),
     ToolSpec(
         name="everything_count",
-        description="Count matching Everything results before searching broad queries.",
+        description="Count matching Everything results inside a host-allowed scope.",
         properties=_properties(
             query=PropertySpec("string"),
             scope=PropertySpec("string"),
@@ -74,7 +74,7 @@ TOOL_SPECS: Final = (
     ),
     ToolSpec(
         name="everything_search",
-        description="Return path-first Everything search candidates with optional metadata.",
+        description="Return path-first candidates inside a host-allowed scope; metadata requires host opt-in.",
         properties=_properties(
             query=PropertySpec("string"),
             scope=PropertySpec("string"),

@@ -43,6 +43,7 @@ and only then parse stdout:
 ```powershell
 $runner = 'C:\replace\with\absolute\path\to\everything-mew-once.exe'
 $env:EVERYTHING_SDK_DLL = 'C:\replace\with\absolute\path\to\EverythingSDK.dll'
+$env:EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 if (-not [IO.Path]::IsPathFullyQualified($runner) -or -not (Test-Path -LiteralPath $runner -PathType Leaf)) {
     throw "Configure the absolute Everything_Mew one-shot runner path."
 }
@@ -72,7 +73,7 @@ host may continue to use `everything-mew-lite` as a compatibility server.
 ## Default workflow
 
 1. Decide whether the task is metadata discovery. If it is content or code understanding, use `read`, `grep`, `ast-grep`, or LSP instead.
-2. Build a scoped Everything query. Pass a known absolute project directory through the `scope` argument, then add extension, date, size, and noisy-directory exclusions.
+2. Build a scoped Everything query. Pass a known absolute project directory inside the host-configured `EVERYTHING_MCP_ALLOWED_ROOTS` through the `scope` argument, then add extension, date, size, and noisy-directory exclusions.
 3. Count before broad search. If the query is broad, ambiguous, or unscoped, call `everything_count` first.
 4. Refine until the result size is useful.
 5. Call `everything_search` with path-first output and `metadata=false` unless metadata is required.
@@ -103,7 +104,7 @@ everything_count -> everything_search -> read/grep/ast-grep/LSP
 - Hard cap is `100`.
 - If a query would exceed the cap, refine instead of raising the limit.
 - Return paths first.
-- Metadata is opt-in. Ask for metadata only when size, date, attributes, or sorting matter.
+- Metadata requires host policy `EVERYTHING_MCP_ALLOW_METADATA=1`. Ask for it only when size, date, or attributes matter.
 
 ## Content hand-off
 
