@@ -154,7 +154,9 @@ def compose_query(query: str, scope: str | None = None) -> str:
     if not is_absolute_scope(normalized_scope):
         raise QuerySyntaxError("scope must be an absolute Windows drive or UNC path")
     recursive_scope = normalized_scope if normalized_scope.endswith("\\") else f"{normalized_scope}\\"
-    return f"{quote_everything_phrase(recursive_scope)} {text}".strip()
+    # Group the caller's entire expression so OR precedence cannot detach a
+    # branch from the trusted scope term (including non-default Everything settings).
+    return f"{quote_everything_phrase(recursive_scope)} <{text}>".strip()
 
 
 def quote_everything_phrase(value: str) -> str:

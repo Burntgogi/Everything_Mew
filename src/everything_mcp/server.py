@@ -8,10 +8,8 @@ from typing import Any
 from .adapters import EverythingAdapter, select_adapter
 from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, SearchBatch, SortName, clamp_limit, path_first_items
 from .errors import BackendUnavailableError, EverythingMcpError
-from .query import (
-    is_path_within_scope,
-    is_safe_query,
-)
+from .query import is_safe_query
+from .policy import SearchPolicy
 from .syntax import syntax_help
 
 TOOL_NAMES = ("everything_status", "everything_count", "everything_search", "everything_syntax_help")
@@ -25,13 +23,22 @@ def everything_status(adapter: EverythingAdapter | None = None) -> dict[str, Any
     return selected.status().to_tool_result()
 
 
-def everything_count(query: str, scope: str | None = None, adapter: EverythingAdapter | None = None) -> dict[str, Any]:
+def everything_count(
+    query: str,
+    scope: str | None = None,
+    adapter: EverythingAdapter | None = None,
+    policy: SearchPolicy | None = None,
+) -> dict[str, Any]:
     if is_broad_query(query, scope):
         return {
             "count": None,
             "tooBroad": True,
             "recommendation": "refine with a path, filename, extension, date, or size before searching",
         }
+    active_policy = policy or SearchPolicy.from_env()
+    denial = active_policy.denial_reason(scope)
+    if denial:
+        return {"count": None, "tooBroad": False, "denied": True, "recommendation": denial}
     selected = adapter or select_adapter()
     try:
         count = selected.count(query=query, scope=scope)
@@ -52,6 +59,7 @@ def everything_search(
     sort: SortName = "name",
     metadata: bool = False,
     adapter: EverythingAdapter | None = None,
+    policy: SearchPolicy | None = None,
 ) -> dict[str, Any]:
     safe_limit = clamp_limit(limit)
     if is_broad_query(query, scope):
@@ -62,6 +70,10 @@ def everything_search(
             "recommendation": "call everything_count after adding path, filename, extension, date, or size filters",
             "items": [],
         }
+    active_policy = policy or SearchPolicy.from_env()
+    denial = active_policy.denial_reason(scope, metadata)
+    if denial:
+        return {"countReturned": 0, "truncated": False, "denied": True, "recommendation": denial, "items": []}
     selected = adapter or select_adapter()
     try:
         search_result = selected.search(query=query, scope=scope, limit=safe_limit + 1, sort=sort, metadata=metadata)
@@ -75,8 +87,7 @@ def everything_search(
     else:
         hits = search_result
         notes = ()
-    if scope:
-        hits = [hit for hit in hits if is_path_within_scope(hit.path, scope)]
+    hits = [hit for hit in hits if active_policy.allows_path(hit.path, scope)]
     truncated = len(hits) > safe_limit
     visible = hits[:safe_limit]
     result: dict[str, Any] = {

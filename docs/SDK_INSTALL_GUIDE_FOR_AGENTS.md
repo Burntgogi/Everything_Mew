@@ -62,7 +62,8 @@ Set the official OpenCode environment substitution in global config:
       "enabled": true,
       "timeout": 20000,
       "environment": {
-        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}",
+        "EVERYTHING_MCP_ALLOWED_ROOTS": "{env:EVERYTHING_MCP_ALLOWED_ROOTS}"
       }
     }
   }
@@ -70,7 +71,8 @@ Set the official OpenCode environment substitution in global config:
 ```
 
 `{env:EVERYTHING_SDK_DLL}` is a literal OpenCode placeholder. Before launching
-OpenCode, set that host variable to the trusted DLL path. Use forward slashes in
+OpenCode, set that host variable to the trusted DLL path and set
+`$env:EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Path\\to\\project"]'`. Use forward slashes in
 the value because OpenCode substitutes it directly into raw JSON. The agent
 procedure below derives the selected 32/64-bit DLL and normalizes its path.
 
@@ -106,6 +108,7 @@ enabled = false
 
 [mcp_servers.everything-mew.env]
 EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Path\\to\\project"]'
 ```
 
 `enabled = false` makes the MCP unavailable and does not add automatic sleep or
@@ -135,6 +138,11 @@ The MCP auto-detects that location because it looks beside `Everything.exe`. Thi
 - `EVERYTHING_ES_EXE`: optional path to a trusted `es.exe` command-line client.
   Configure it only when the ES CLI fallback is intentionally installed. It
   does not replace the SDK DLL for the primary backend.
+- `EVERYTHING_MCP_ALLOWED_ROOTS`: JSON array of bounded absolute directories;
+  search and count calls require a scope inside one of them.
+- `EVERYTHING_MCP_ALLOW_METADATA=1`: optionally permit metadata responses.
+- `EVERYTHING_MCP_ALLOW_UNSCOPED=1`: explicitly restore unrestricted index
+  search instead of configuring allowed roots.
 
 An SDK-first OpenCode environment can set the first two values and omit the ES
 fallback:
@@ -142,7 +150,8 @@ fallback:
 ```json
 {
   "EVERYTHING_EXE": "C:/Program Files/Everything/Everything.exe",
-  "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
+  "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}",
+  "EVERYTHING_MCP_ALLOWED_ROOTS": "{env:EVERYTHING_MCP_ALLOWED_ROOTS}"
 }
 ```
 
@@ -243,7 +252,7 @@ fallback:
 
    print(everything_status())
    print(everything_count("ext:md", scope=r"C:\Path\to\project"))
-   print(everything_search("ext:md", scope=r"C:\Path\to\project", limit=5, metadata=True))
+   print(everything_search("ext:md", scope=r"C:\Path\to\project", limit=5))
    ```
 
 FastMCP is optional. If a host explicitly requires the legacy

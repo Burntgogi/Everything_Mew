@@ -15,6 +15,12 @@ server = import_module("everything_mcp.server")
 SearchHit = import_module("everything_mcp.contracts").SearchHit
 
 
+@pytest.fixture(autouse=True)
+def unrestricted_policy_for_query_guard_tests(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("EVERYTHING_MCP_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("EVERYTHING_MCP_ALLOW_UNSCOPED", "1")
+
+
 class SubprocessRunCall(TypedDict):
     args: list[str]
     check: bool
@@ -149,10 +155,10 @@ def test_regex_is_not_reported_as_a_positive_indexed_filter() -> None:
 @pytest.mark.parametrize(
     ("scope", "expected"),
     (
-        (r"C:\Work", '"C:\\Work\\" ext:md'),
-        ("C:\\Program Files\\", '"C:\\Program Files\\" ext:md'),
-        ("C:/Work/project/", '"C:\\Work\\project\\" ext:md'),
-        (r"\\server\share\project", '"\\\\server\\share\\project\\" ext:md'),
+        (r"C:\Work", '"C:\\Work\\" <ext:md>'),
+        ("C:\\Program Files\\", '"C:\\Program Files\\" <ext:md>'),
+        ("C:/Work/project/", '"C:\\Work\\project\\" <ext:md>'),
+        (r"\\server\share\project", '"\\\\server\\share\\project\\" <ext:md>'),
     ),
 )
 def test_scope_composition_uses_an_exact_recursive_folder_boundary(scope: str, expected: str) -> None:
@@ -376,7 +382,7 @@ def test_es_cli_uses_subprocess_without_shell(monkeypatch: MonkeyPatch) -> None:
     assert calls[0]["shell"] is False
     assert calls[0]["timeout"] == es_cli.DEFAULT_ES_TIMEOUT_SECONDS
     assert calls[0]["args"][0] == r"C:\Tools\es.exe"
-    assert calls[0]["args"][-1] == '"C:\\Work\\" ext:md'
+    assert calls[0]["args"][-1] == '"C:\\Work\\" <ext:md>'
 
 
 def test_es_cli_bad_count_raises_actionable_query_error(monkeypatch: MonkeyPatch) -> None:
@@ -433,7 +439,7 @@ def test_es_cli_timeout_raises_query_error(monkeypatch: MonkeyPatch) -> None:
 def test_es_cli_spaced_scope_is_quoted() -> None:
     adapter = es_cli.EsCliAdapter(Path(r"C:\Tools\es.exe"))
 
-    assert adapter._compose_query("ext:exe", r"C:\Program Files") == '"C:\\Program Files\\" ext:exe'
+    assert adapter._compose_query("ext:exe", r"C:\Program Files") == '"C:\\Program Files\\" <ext:exe>'
 
 
 def test_sdk_adapter_configures_ctypes_signatures() -> None:

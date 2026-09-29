@@ -5,7 +5,8 @@
       "command": ["everything-mew-lite"],
       "enabled": true,
       "environment": {
-        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}",
+        "EVERYTHING_MCP_ALLOWED_ROOTS": "{env:EVERYTHING_MCP_ALLOWED_ROOTS}"
       }
     }
   }

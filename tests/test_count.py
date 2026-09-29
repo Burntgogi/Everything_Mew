@@ -1,8 +1,17 @@
 from importlib import import_module
 from typing import Any
 
+import pytest
+from pytest import MonkeyPatch
+
 contracts = import_module("everything_mcp.contracts")
 server = import_module("everything_mcp.server")
+
+
+@pytest.fixture(autouse=True)
+def unrestricted_policy_for_count_contract_tests(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("EVERYTHING_MCP_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("EVERYTHING_MCP_ALLOW_UNSCOPED", "1")
 
 
 class CountingAdapter:

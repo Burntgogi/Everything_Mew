@@ -96,6 +96,7 @@ py -m venv .venv
 
 ```powershell
 $env:EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+$env:EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 $runner = (Resolve-Path ".\.venv\Scripts\everything-mew-once.exe").Path
 $request = @{
     schemaVersion = 1
@@ -121,6 +122,7 @@ enabled_tools = ["everything_status", "everything_count", "everything_search", "
 
 [mcp_servers.everything-mew.env]
 EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 ```
 
 `enabled = false`는 MCP를 사용할 수 없게 하는 설정이며, 필요할 때 자동으로
@@ -141,7 +143,8 @@ OpenCode에서는 부모 프로세스의 환경 변수에 SDK 경로를 설정�
       "command": ["everything-mew-lite"],
       "enabled": true,
       "environment": {
-        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}"
+        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}",
+        "EVERYTHING_MCP_ALLOWED_ROOTS": "{env:EVERYTHING_MCP_ALLOWED_ROOTS}"
       }
     }
   }
@@ -207,14 +210,30 @@ Codex 권장 명령인 `everything-mew-once`, 별칭 `everything-mcp-once`, lite
 
 ## 검색 문법 호환성과 안전
 
+`everything_count`와 `everything_search`를 사용하기 전에
+`EVERYTHING_MCP_ALLOWED_ROOTS`에 허용할 절대 Windows 디렉터리를 JSON 배열로
+설정하세요. PowerShell과 TOML에서는 예를 들어
+`'["C:\\Work\\project"]'`를 사용합니다. 두 도구 호출 모두 허용된 디렉터리
+안의 `scope`를 지정해야 합니다. 허용 경로를 설정하지 않으면 Everything
+백엔드를 호출하기 전에 검색과 건수 조회를 거부합니다. `metadata=true`를
+사용하려면 실행 환경에 `EVERYTHING_MCP_ALLOW_METADATA=1`도 설정해야 합니다.
+
+기존의 전체 인덱스 검색을 명시적으로 허용하려면 허용 경로 대신
+`EVERYTHING_MCP_ALLOW_UNSCOPED=1`을 설정할 수 있습니다. 이 모드는
+`EVERYTHING_MCP_ALLOWED_ROOTS`와 함께 사용할 수 없습니다. 두 모드 모두 기존의
+광범위 쿼리 검사를 유지합니다. 이 설정은 도구 인자가 아니라 호스트 또는
+one-shot 프로세스의 환경 변수로 전달하고, 상주 MCP 호스트에서는 변경 후
+재시작하세요.
+
 Everything 1.4.1 핵심 문법을 기본 호환 프로필로 사용합니다. Everything 1.5에서만
 문서화된 기능을 사용하기 전에는 `everything_status`를 확인하세요. 쿼리는
 Python 어댑터가 아니라 실행 중인 Everything 프로세스에서 해석합니다.
 
 범위가 제한된 절대 디렉터리를 `scope` 인자로 전달하세요. 예를 들어
 `scope="C:\Work\project"`는 정확한 재귀 폴더 항목
-`"C:\Work\project\"`로 조합되며, 반환 경로가 정규화된 범위 안에 있는지 다시
-확인합니다. `path:"C:\Work\project"` 같은 부분 일치 쿼리는
+`"C:\Work\project\"`로 조합됩니다. 쿼리 전체를 그 경로 조건으로 묶고
+반환 경로가 정규화된 범위 안에 있는지 다시 확인합니다.
+`path:"C:\Work\project"` 같은 부분 일치 쿼리는
 `C:\Work\project-backup`처럼 접두사가 같은 형제 경로도 포함할 수 있으므로
 동일한 표현이 아닙니다.
 

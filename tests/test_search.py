@@ -12,6 +12,13 @@ contracts = import_module("everything_mcp.contracts")
 server = import_module("everything_mcp.server")
 
 
+@pytest.fixture(autouse=True)
+def unrestricted_policy_for_search_contract_tests(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("EVERYTHING_MCP_ALLOWED_ROOTS", raising=False)
+    monkeypatch.setenv("EVERYTHING_MCP_ALLOW_UNSCOPED", "1")
+    monkeypatch.setenv("EVERYTHING_MCP_ALLOW_METADATA", "1")
+
+
 class SearchAdapter:
     name = "fake"
 
