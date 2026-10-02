@@ -78,15 +78,25 @@ interface. Download the SDK from the
 and keep the DLL in a trusted local support directory. The DLL is not bundled
 with this repository or its Python package.
 
-### 2. Install the stable release
+### 2. Install the source revision with allowed-root controls
+
+The policy settings below require the unreleased allowed-root change from
+[PR #8](https://github.com/Burntgogi/Everything_Mew/pull/8). The latest stable
+tag, `v0.3.0`, does **not** enforce these settings. Install from `main` when
+following this guide:
 
 ```powershell
 git clone https://github.com/Burntgogi/Everything_Mew.git
 cd Everything_Mew
-git checkout v0.3.0
+git checkout --detach origin/main
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\python.exe -c "from everything_mcp.policy import SearchPolicy; assert SearchPolicy().denial_reason(None) is not None; print('Allowed-root policy available')"
 ```
+
+Stop if the policy check fails. Reinstall from the source checkout above before
+enabling a search host. Its package version is still `0.3.0`, so the version
+number alone does not establish that the policy is installed.
 
 ### 3. Use the one-shot runner from Codex
 
@@ -209,6 +219,10 @@ Official references:
 - [Everything_GetTotResults](https://www.voidtools.com/support/everything/sdk/everything_gettotresults/)
 
 ## Query compatibility and safety
+
+For roots and scopes, use standard drive paths such as `C:\Work\project` or UNC
+paths such as `\\server\share\project`; device and extended-length prefixes
+(`\\.\` and `\\?\`) are unsupported.
 
 Set `EVERYTHING_MCP_ALLOWED_ROOTS` to a JSON array of absolute, bounded Windows
 directories before calling `everything_count` or `everything_search`. For

@@ -36,6 +36,13 @@ official voidtools Everything SDK over local IPC.
 
 ## Install The Runtime
 
+Install the current `main` source for the unreleased allowed-root policy and
+its path validation fixes. The stable `v0.3.0` tag does not enforce these
+settings. For a fresh checkout, use the
+[source installation](../README.md#2-install-the-source-revision-with-allowed-root-controls).
+The package version remains `0.3.0`; verify the installed policy below before
+enabling a host.
+
 From the repository root, create the intended virtual environment, resolve its
 Python executable once, and install the dependency-free runtime. FastMCP and
 the development toolchain are not part of this default path:
@@ -45,6 +52,8 @@ py -m venv .venv
 $python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
 & $python -m pip install -e .
 & $python -m pip check
+& $python -c "from everything_mcp.policy import SearchPolicy; assert SearchPolicy().denial_reason(None) is not None; print('Allowed-root policy available')"
+if ($LASTEXITCODE -ne 0) { throw "Install the source revision with allowed-root controls before continuing." }
 ```
 
 Keep using `$python` from this repository-root PowerShell session. Verify the
@@ -282,7 +291,8 @@ per host session.
 - `EVERYTHING_ES_EXE`: trusted path to `es.exe` only when the optional ES CLI
   fallback is intentionally installed.
 - `EVERYTHING_MCP_ALLOWED_ROOTS`: JSON array of bounded absolute directories.
-  Search and count calls require a scope inside one of these roots.
+  Search and count calls require a scope inside one of these roots. Use standard
+  drive or UNC paths; device prefixes `\\?\` and `\\.\` are unsupported.
 - `EVERYTHING_MCP_ALLOW_METADATA=1`: optionally permit metadata responses.
 - `EVERYTHING_MCP_ALLOW_UNSCOPED=1`: explicitly restore unrestricted index
   search instead of configuring allowed roots.

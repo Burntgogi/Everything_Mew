@@ -34,6 +34,13 @@ The MCP is SDK-first. `es.exe` is only a fallback when SDK/IPC is unavailable.
 
 ## Recommended Install Strategy
 
+Install the current `main` source for the unreleased allowed-root policy and
+its path validation fixes. The stable `v0.3.0` tag does not enforce these
+settings. Follow the
+[source installation](../README.md#2-install-the-source-revision-with-allowed-root-controls)
+for a fresh checkout, and verify the installed policy below. The package
+version remains `0.3.0`, so checking that number alone is insufficient.
+
 Create a project-local environment and install the dependency-free runtime.
 Codex should use the one-shot command; always-enabled OpenCode or manual MCP
 hosts can use the lite path. Neither requires FastMCP:
@@ -43,6 +50,8 @@ py -m venv .venv
 $python = (Resolve-Path ".\.venv\Scripts\python.exe").Path
 & $python -m pip install -e .
 & $python -m pip check
+& $python -c "from everything_mcp.policy import SearchPolicy; assert SearchPolicy().denial_reason(None) is not None; print('Allowed-root policy available')"
+if ($LASTEXITCODE -ne 0) { throw "Install the source revision with allowed-root controls before continuing." }
 ```
 
 Official C docs recommend copying the DLL beside the consuming program executable. For OpenCode MCP usage, prefer a user-writable support directory and configure the MCP environment explicitly:
@@ -139,7 +148,8 @@ The MCP auto-detects that location because it looks beside `Everything.exe`. Thi
   Configure it only when the ES CLI fallback is intentionally installed. It
   does not replace the SDK DLL for the primary backend.
 - `EVERYTHING_MCP_ALLOWED_ROOTS`: JSON array of bounded absolute directories;
-  search and count calls require a scope inside one of them.
+  search and count calls require a scope inside one of them. Use standard drive
+  or UNC paths; device prefixes `\\?\` and `\\.\` are unsupported.
 - `EVERYTHING_MCP_ALLOW_METADATA=1`: optionally permit metadata responses.
 - `EVERYTHING_MCP_ALLOW_UNSCOPED=1`: explicitly restore unrestricted index
   search instead of configuring allowed roots.

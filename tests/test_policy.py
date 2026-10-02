@@ -127,6 +127,36 @@ def test_invalid_allowed_roots_fail_closed(monkeypatch: MonkeyPatch, value: str)
         SearchPolicy.from_env()
 
 
+@pytest.mark.parametrize("root", (r"\\?\C:\Work", r"\\.\C:\Work", "//?/C:/Work", "//./C:/Work"))
+def test_device_namespace_allowed_roots_fail_closed(monkeypatch: MonkeyPatch, root: str) -> None:
+    monkeypatch.setenv("EVERYTHING_MCP_ALLOWED_ROOTS", json.dumps([root]))
+    monkeypatch.delenv("EVERYTHING_MCP_ALLOW_UNSCOPED", raising=False)
+
+    with pytest.raises(ValueError, match="device namespace"):
+        SearchPolicy.from_env()
+
+
+@pytest.mark.parametrize("root", (r"\\?\C:\Work", r"\\.\C:\Work"))
+def test_device_namespace_scopes_are_denied_before_backend(root: str) -> None:
+    policy = SearchPolicy(allowed_roots=(root,))
+    adapter = RecordingAdapter()
+
+    count = server.everything_count("README ext:md", scope=root, adapter=adapter, policy=policy)
+    search = server.everything_search("README ext:md", scope=root, adapter=adapter, policy=policy)
+
+    assert count.get("denied") is True
+    assert search.get("denied") is True
+    assert adapter.count_calls == []
+    assert adapter.search_calls == []
+
+
+@pytest.mark.parametrize("root", (r"\\?\C:\Work", r"\\.\C:\Work"))
+def test_device_namespace_hits_are_rejected(root: str) -> None:
+    policy = SearchPolicy(allowed_roots=(root,))
+
+    assert policy.allows_path(root + r"\linked\secret.txt", root) is False
+
+
 def test_unc_scope_uses_component_boundary() -> None:
     policy = SearchPolicy(allowed_roots=(r"\\server\share\project",))
     assert policy.denial_reason(r"\\server\share\project\docs") is None
@@ -134,7 +164,8 @@ def test_unc_scope_uses_component_boundary() -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows reparse-point test")
-def test_existing_link_to_outside_root_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prefix", ("", "\\\\?\\", "\\\\.\\"))
+def test_existing_link_to_outside_root_is_rejected(tmp_path: Path, prefix: str) -> None:
     allowed = tmp_path / "allowed"
     outside = tmp_path / "outside"
     allowed.mkdir()
@@ -152,6 +183,7 @@ def test_existing_link_to_outside_root_is_rejected(tmp_path: Path) -> None:
         if created.returncode != 0:
             pytest.skip("directory links and junctions unavailable")
 
-    policy = SearchPolicy(allowed_roots=(str(allowed),))
-    assert policy.denial_reason(str(linked)) is not None
-    assert policy.allows_path(str(linked / "secret.txt"), str(allowed)) is False
+    scope = prefix + str(allowed)
+    policy = SearchPolicy(allowed_roots=(scope,))
+    assert policy.denial_reason(prefix + str(linked)) is not None
+    assert policy.allows_path(prefix + str(linked / "secret.txt"), scope) is False

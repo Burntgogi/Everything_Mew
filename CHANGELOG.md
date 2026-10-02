@@ -4,6 +4,20 @@ All notable release changes are documented here. / 주요 릴리스 변경 사�
 
 ## [Unreleased]
 
+- Add host-configured allowed roots and metadata controls to search and count
+  ([#8](https://github.com/Burntgogi/Everything_Mew/pull/8)). These controls are
+  absent from the `v0.3.0` tag despite the unchanged source package version.
+- Direct the installation guide to the policy-bearing main branch and check
+  for the installed policy before enabling a search host.
+- Reject device and extended-length path prefixes in allowed roots, scopes,
+  and restricted search results so local junction checks cannot be skipped.
+- 검색과 건수 조회에 호스트가 설정하는 허용 경로 및 메타데이터 제한을
+  추가했습니다. 소스의 패키지 버전은 그대로지만 `v0.3.0` 태그에는 이 기능이 없습니다.
+- 설치 안내에서 정책이 포함된 main 소스를 사용하고 검색 호스트 활성화 전
+  정책 설치 여부를 확인하도록 했습니다.
+- 허용 루트·검색 범위·제한 모드의 검색 결과에서 장치 및 확장 경로 접두사를
+  거부해 로컬 junction 검사가 생략되지 않도록 했습니다.
+
 ## [0.3.0] - 2026-08-13
 
 The final package version is `0.3.0` and its Git tag is `v0.3.0`. It promotes
