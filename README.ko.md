@@ -77,15 +77,24 @@ Everything Lite는 필요한 IPC 인터페이스를 제공하지 않으므로 �
 SDK를 내려받아 신뢰할 수 있는 로컬 지원 디렉터리에 DLL을 보관하세요. 이
 저장소와 Python 패키지에는 DLL이 포함되어 있지 않습니다.
 
-### 2. 안정판을 설치하세요
+### 2. 허용 경로 제한이 포함된 소스 리비전을 설치하세요
+
+아래 정책 설정에는 [PR #8](https://github.com/Burntgogi/Everything_Mew/pull/8)의
+미출시 변경이 필요합니다. 최신 안정 태그인 `v0.3.0`에는 이 설정을 적용하는
+기능이 없습니다. 이 안내를 따를 때는 `main` 소스를 설치하세요.
 
 ```powershell
 git clone https://github.com/Burntgogi/Everything_Mew.git
 cd Everything_Mew
-git checkout v0.3.0
+git checkout --detach origin/main
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
+.\.venv\Scripts\python.exe -c "from everything_mcp.policy import SearchPolicy; assert SearchPolicy().denial_reason(None) is not None; print('Allowed-root policy available')"
 ```
+
+정책 확인에 실패하면 검색 호스트를 활성화하기 전에 위 리비전에서 다시
+설치하세요. 패키지 버전은 여전히 `0.3.0`이므로 버전 번호만으로 정책 기능의
+설치 여부를 판단할 수 없습니다.
 
 ### 3. Codex에서 one-shot 실행기를 사용하세요
 
@@ -211,6 +220,10 @@ Codex 권장 명령인 `everything-mew-once`, 별칭 `everything-mcp-once`, lite
 ## 검색 문법 호환성과 안전
 
 `everything_count`와 `everything_search`를 사용하기 전에
+루트와 `scope`에는 `C:\Work\project` 같은 일반 드라이브 경로나
+`\\server\share\project` 같은 UNC 경로를 사용하세요. 장치·확장 경로 접두사
+`\\.\`와 `\\?\`는 지원하지 않습니다.
+
 `EVERYTHING_MCP_ALLOWED_ROOTS`에 허용할 절대 Windows 디렉터리를 JSON 배열로
 설정하세요. PowerShell과 TOML에서는 예를 들어
 `'["C:\\Work\\project"]'`를 사용합니다. 두 도구 호출 모두 허용된 디렉터리

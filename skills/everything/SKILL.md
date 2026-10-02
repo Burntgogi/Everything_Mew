@@ -36,6 +36,16 @@ Use this skill when a user needs to find candidate files or folders on Windows b
 
 ## Execution contract
 
+Allowed-root controls and their path validation fixes require the unreleased
+runtime from current `main`.
+The stable `v0.3.0` tag ignores the policy environment variables. Verify the
+installed runtime using the policy check in the agent installation guide;
+its package version alone cannot distinguish these builds. Stop and report a
+missing policy before searching.
+
+Use standard drive or UNC paths for roots and scopes. Device and extended-length
+prefixes `\\?\` and `\\.\` are unsupported.
+
 In Codex, invoke the installed one-shot runner once per tool request. Resolve
 the runner to an absolute path, pass one JSON object on stdin, wait for exit,
 and only then parse stdout:

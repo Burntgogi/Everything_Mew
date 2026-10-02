@@ -15,6 +15,10 @@ ALLOW_METADATA_ENV = "EVERYTHING_MCP_ALLOW_METADATA"
 
 def _canonical_path(value: str) -> str:
     normalized = normalize_scope(value)
+    # Device namespaces share the UNC prefix but can address local reparse
+    # points. Reject them rather than bypassing local canonicalization below.
+    if normalized.startswith(("\\\\?\\", "\\\\.\\")):
+        raise ValueError("device namespace paths are not supported by server policy")
     if not is_absolute_scope(normalized):
         raise ValueError("scope must be an absolute Windows path")
     # Resolve local reparse points when they exist. UNC paths retain their
