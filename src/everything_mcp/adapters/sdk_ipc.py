@@ -191,8 +191,12 @@ class _Win32QueryReplyWindow:
             raise OSError("Could not create the Everything SDK reply window.")
         self.hwnd = int(hwnd)
         self._window_destroyed = False
-        # Match the SDK's own reply window so a lower-integrity Everything can reply to an elevated caller.
-        self._user32.ChangeWindowMessageFilterEx(self.hwnd, WM_COPYDATA, MSGFLT_ALLOW, None)
+        # Like the SDK's own reply window, let a lower-integrity Everything reply to an elevated
+        # caller, but only when Everything really runs lower; otherwise keep UIPI closed.
+        from .native_ipc import everything_needs_uipi_exception
+
+        if everything_needs_uipi_exception():
+            self._user32.ChangeWindowMessageFilterEx(self.hwnd, WM_COPYDATA, MSGFLT_ALLOW, None)
 
     def _configure_win32(self) -> None:
         self._kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]

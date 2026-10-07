@@ -106,7 +106,7 @@ Same machine, scoped `ext:py` search returning 20 paths, ten calls.
 passed: lite 13.4 MiB private per session against FastMCP 72 MiB, 12 owned
 PIDs all exited, independent PID recheck clean.
 
-Tests: 526 passed (443 before, 83 added), Ruff clean, strict mypy clean on
+Tests: 549 passed (443 before, 106 added), Ruff clean, strict mypy clean on
 `src` and `tests`. New live tests skip when Everything is not running.
 
 ## Claude Code benchmark
@@ -159,14 +159,19 @@ found three issues in this audit's own changes and fixed them before release:
 | The worker bootstrap prepended its package directory to `sys.path` | For an installed wheel that directory is site-packages, so a module there could shadow the standard library | The directory is appended |
 | Native IPC reply IDs were sequential | With `WM_COPYDATA` allowed through UIPI, a lower-integrity program could guess the ID and inject results into an elevated agent | Reply IDs are random 32-bit values |
 
-Accepted limits, documented in `SECURITY.md` and the README:
+A second pass patched three trust limits that the first pass had only
+documented:
 
-- The Everything IPC window is unauthenticated. A same-user program can
-  register its class, read queries, and return false results. The SDK DLL and
-  `es.exe` share this limit; allowed roots still filter every returned path.
-- Returned file names are attacker-controlled text in the agent's context.
-- The worker inherits the host environment. It runs with `-I -S`, so `PYTHON*`
-  variables and `.pth` files do not affect it.
+| Limit | Patch | Evidence |
+| --- | --- | --- |
+| A same-user program can register the Everything window class, read queries, and return false results | Native IPC resolves the window's owner (`GetWindowThreadProcessId`, `QueryFullProcessImageNameW`) and fails closed unless it is `EVERYTHING_EXE`. Program Files is administrator-protected, so a non-elevated program cannot plant that image | A separate process registered the class and returned a fake path. With the check, the call failed and the impostor received no query; without it, the fake path was accepted |
+| The reply window always accepted `WM_COPYDATA` from lower integrity levels | The exception is added only when the owner's token integrity is lower than the agent's | Live: a medium-integrity agent and Everything left UIPI closed |
+| Attacker-chosen file names reach the model | Model-visible text escapes format (`Cf`) and surrogate (`Cs`) characters such as U+202E and zero-width spaces; instructions and the search description mark paths as untrusted data. `structuredContent` keeps exact names | Unit tests round-trip the escaped JSON to the original names |
+
+Each check costs about 0.03 ms per call. Remaining limits: the forced `sdk`
+and `es` backends do not verify the owner; ordinary words in a file name can
+still attempt prompt injection; and the worker inherits the host environment,
+though `-I -S` keeps `PYTHON*` variables and `.pth` files from affecting it.
 
 Other checks found no issue: policy denial still runs before any backend call,
 compose grouping still binds OR branches to the scope, LIST2 parsing rejects

@@ -130,7 +130,10 @@ OpenCode, Claude Code 등 MCP 호스트는 `everything-mew-lite`를 사용합니
 
 Everything Lite는 IPC 인터페이스를 제공하지 않으므로 지원하지 않습니다.
 Everything SDK DLL은 필요하지 않습니다. Everything_Mew가 공개된 Everything IPC
-프로토콜을 직접 사용합니다.
+프로토콜을 직접 사용합니다. Everything이
+`C:\Program Files\Everything\Everything.exe`에 설치되어 있지 않다면
+`EVERYTHING_EXE`를 실제 실행 파일로 지정하세요. 서버는 이 실행 파일이 소유한
+Everything 창하고만 통신합니다.
 
 ### 2. 0.4.0 이상을 설치하세요
 
@@ -404,6 +407,8 @@ Windows 11, Python 3.13, Everything 1.4.1.1024에서 범위를 지정한 `ext:py
 | `EVERYTHING_MCP_IDLE_EXIT_SECONDS` | 미설정 | 이 시간(초) 동안 요청이 없으면 lite 서버를 종료합니다. stdio 서버를 필요할 때 다시 시작하는 호스트에서만 사용하세요. |
 | `EVERYTHING_MCP_BACKEND` | `auto` | `native`, `sdk`, `es` 중 하나로 백엔드를 고정합니다. |
 | `EVERYTHING_INSTANCE` | 미설정 | 이름 있는 Everything 인스턴스입니다(예: `1.5a`). |
+| `EVERYTHING_EXE` | `C:\Program Files\Everything\Everything.exe` | 신뢰하는 Everything 실행 파일입니다. 다른 프로그램이 소유한 창은 네이티브 IPC가 거부합니다. |
+| `EVERYTHING_MCP_VERIFY_IPC_OWNER` | `1` | `0`이면 창 소유자 확인을 끕니다. |
 
 실패한 호출은 빈 결과가 아니라 도구 오류입니다. 백엔드 사용 불가, 쿼리 실패,
 정책 거부, 설정 오류는 `error.code`와 함께 `isError=true`를 반환하고 one-shot
@@ -463,19 +468,25 @@ Everything_Mew는 읽기 전용입니다. 다음 작업을 제안하거나 수�
 샌드박스는 아닙니다. 위험도가 높은 작업은 권한을 적절히 제한한 Windows 계정
 또는 다른 운영체제 격리 환경에서 실행하세요.
 
-다음 신뢰 한계를 알아 두세요.
+네이티브 IPC 백엔드는 다음 보호 장치를 적용합니다.
 
-- **파일 이름은 신뢰할 수 없는 입력입니다.** 파일을 만들 수 있는 사람은 누구나
-  이름을 정할 수 있고, 에이전트는 반환된 경로를 텍스트로 읽습니다. 지시문처럼
-  보이는 경로는 데이터로만 취급하세요.
-- **Everything IPC 창은 인증되지 않습니다.** 같은 Windows 사용자로 실행되는
-  프로그램은 Everything 창 클래스를 등록할 수 있습니다. 그러면 쿼리를 읽고 거짓
-  결과를 돌려줄 수 있습니다. SDK DLL과 `es.exe`도 마찬가지입니다. 이 경우에도
-  허용 경로는 범위 밖의 경로를 모두 걸러 냅니다.
-- **응답은 UIPI 경계를 넘습니다.** 에이전트가 관리자 권한이고 Everything이
-  아니면, 응답 창은 낮은 무결성 수준의 `WM_COPYDATA`를 받아야 합니다. 네이티브
-  IPC 백엔드는 쿼리마다 무작위 32비트 응답 ID를 쓰므로 다른 프로그램이 응답을
-  끼워 넣기 어렵습니다.
+- **응답하는 쪽을 확인합니다.** 같은 Windows 사용자로 실행되는 프로그램은
+  Everything 창 클래스를 등록할 수 있습니다. 백엔드는 쿼리를 보내기 전에 그 창을
+  소유한 프로세스가 `EVERYTHING_EXE`를 실행 중인지 확인합니다. 아니면 호출이
+  실패하고 쿼리는 전송되지 않습니다. 관리자만 실행 파일을 바꿀 수 있도록
+  Everything을 `C:\Program Files`에 두세요. 포터블 설치라면 `EVERYTHING_EXE`를 그
+  경로로 지정하세요.
+- **필요할 때만 UIPI를 엽니다.** 응답 창은 Everything이 에이전트보다 낮은
+  무결성 수준에서 실행될 때만 낮은 수준의 `WM_COPYDATA`를 받습니다. 또한 쿼리마다
+  무작위 32비트 응답 ID를 씁니다.
+- **파일 이름을 신뢰할 수 없는 데이터로 표시합니다.** 파일을 만들 수 있는
+  사람은 누구나 이름을 정할 수 있습니다. 도구 텍스트는 U+202E 같은 보이지 않는
+  문자와 양방향 제어 문자를 이스케이프하고, 서버는 에이전트에게 파일 이름 속
+  지시를 따르지 말라고 알립니다.
+
+강제 지정한 `sdk`와 `es` 백엔드는 창 소유자를 확인하지 않습니다.
+`EVERYTHING_EXE`를 실행 중인 Everything 실행 파일로 지정할 수 없을 때만
+`EVERYTHING_MCP_VERIFY_IPC_OWNER=0`을 설정하세요.
 
 취약점은 [SECURITY.md](SECURITY.md)의 비공개 절차로 신고하세요. 공개 이슈에는
 자격 증명, 비공개 경로, 개인 파일 내용을 첨부하지 마세요.
@@ -493,7 +504,7 @@ py -m build
 
 `v0.4.0` 릴리스 후보는 Python 3.13에서 다음 로컬 검증을 통과했습니다.
 
-- pytest 537건, Ruff, 소스·테스트 37개 파일에 대한 strict mypy를
+- pytest 549건, Ruff, 소스·테스트 38개 파일에 대한 strict mypy를
   통과했습니다.
 - 실제 Everything 1.4.1 인덱스에서 쿼리·정렬·메타데이터 조합 6가지에 대해
   네이티브 IPC 결과가 Everything SDK DLL과 같았습니다.
@@ -503,6 +514,9 @@ py -m build
   깨끗했습니다.
 - Bandit 검사에서는 셸 없이 고정 인수로 호출하는 `subprocess`에 대한 낮은
   심각도 알림만 나왔습니다.
+- 가장 공격 시험: 별도 프로세스가 Everything 창 클래스를 등록하고 가짜 경로를
+  돌려주게 했습니다. 소유자 확인을 켜면 쿼리를 보내기 전에 호출이 실패했고,
+  끄면 가짜 경로가 결과로 들어왔습니다.
 
 푸시와 pull request에는 Windows GitHub Actions가 Python 3.11과 3.14 검증을
 수행합니다. 최종 검증 결과는

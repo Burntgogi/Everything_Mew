@@ -74,6 +74,15 @@ for the method and limits.
 
 #### Security
 
+- Native IPC sends a query only to an Everything window that the
+  `EVERYTHING_EXE` process owns, and fails closed otherwise. A same-user
+  program that registers the Everything window class no longer receives
+  queries or injects results. `EVERYTHING_MCP_VERIFY_IPC_OWNER=0` disables the
+  check.
+- The reply window accepts `WM_COPYDATA` across UIPI only when Everything runs
+  at a lower integrity level than the agent.
+- Tool text escapes invisible and bidirectional characters in file names, and
+  the server instructions mark paths as untrusted data.
 - Every message to Everything uses `SendMessageTimeout`, so a hung Everything
   cannot block a call without limit.
 - Native IPC replies use a random 32-bit reply ID and pass bounds checks.
@@ -140,6 +149,14 @@ Everything_Mew를 쓰면 16.5초, 기본 도구만 쓰면 216.7초였습니다. 
 
 #### 보안
 
+- 네이티브 IPC는 `EVERYTHING_EXE` 프로세스가 소유한 Everything 창에만 쿼리를
+  보내고, 아니면 실패로 끝냅니다. Everything 창 클래스를 등록한 같은 사용자의
+  프로그램은 더 이상 쿼리를 받거나 결과를 끼워 넣지 못합니다.
+  `EVERYTHING_MCP_VERIFY_IPC_OWNER=0`으로 이 확인을 끌 수 있습니다.
+- 응답 창은 Everything이 에이전트보다 낮은 무결성 수준에서 실행될 때만 UIPI를
+  넘는 `WM_COPYDATA`를 받습니다.
+- 도구 텍스트는 파일 이름 속 보이지 않는 문자와 양방향 제어 문자를
+  이스케이프하고, 서버 지침은 경로를 신뢰할 수 없는 데이터로 표시합니다.
 - Everything에 보내는 모든 메시지는 `SendMessageTimeout`을 사용하므로, 멈춘
   Everything이 호출을 무한정 막지 못합니다.
 - 네이티브 IPC 응답은 무작위 32비트 응답 ID를 쓰고 경계 검사를 거칩니다.

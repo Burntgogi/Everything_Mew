@@ -133,7 +133,10 @@ You need:
 
 Everything Lite is not supported because it does not expose the IPC interface.
 You do not need the Everything SDK DLL: Everything_Mew speaks the documented
-Everything IPC protocol itself.
+Everything IPC protocol itself. If Everything is not installed at
+`C:\Program Files\Everything\Everything.exe`, set `EVERYTHING_EXE` to its
+executable. The server only talks to an Everything window that this
+executable owns.
 
 ### 2. Install version 0.4.0 or later
 
@@ -410,6 +413,8 @@ not guarantees.
 | `EVERYTHING_MCP_IDLE_EXIT_SECONDS` | unset | Exit the lite server after this many idle seconds. Only use it with hosts that restart stdio servers on demand. |
 | `EVERYTHING_MCP_BACKEND` | `auto` | `native`, `sdk`, or `es` forces one backend. |
 | `EVERYTHING_INSTANCE` | unset | Named Everything instance, for example `1.5a`. |
+| `EVERYTHING_EXE` | `C:\Program Files\Everything\Everything.exe` | The trusted Everything executable. Native IPC refuses a window that another program owns. |
+| `EVERYTHING_MCP_VERIFY_IPC_OWNER` | `1` | `0` disables the window owner check. |
 
 Failed calls are tool errors, not empty results: backend unavailability, query
 failures, policy denials, and configuration errors set `isError=true` with an
@@ -469,20 +474,26 @@ The query guard reduces accidental broad or slow searches; it is not an OS
 sandbox. Run high-risk workloads under an appropriately restricted Windows
 account or other operating-system isolation.
 
-Know these trust limits:
+The native IPC backend applies these protections:
 
-- **File names are untrusted input.** Anyone who can create a file can choose
-  its name, and the agent reads returned paths as text. Treat a path that looks
-  like an instruction as data.
-- **The Everything IPC window is not authenticated.** Any program that runs as
-  the same Windows user can register the Everything window class. It can then
-  read the queries and return false results. This applies equally to the SDK
-  DLL and `es.exe`. Allowed roots still drop every returned path outside the
-  scope.
-- **Replies cross the UIPI boundary.** When the agent runs elevated and
-  Everything does not, the reply window must accept `WM_COPYDATA` from a lower
-  integrity level. The native IPC backend uses a random 32-bit reply ID for
-  each query, so another program cannot easily inject a reply.
+- **It verifies who answers.** Any program that runs as the same Windows user
+  can register the Everything window class. Before it sends a query, the
+  backend checks that the process that owns the window runs
+  `EVERYTHING_EXE`. If it does not, the call fails and no query is sent.
+  Keep Everything in `C:\Program Files`, where only an administrator can
+  replace the executable. For a portable install, set `EVERYTHING_EXE` to its
+  path.
+- **It opens UIPI only when needed.** The reply window accepts `WM_COPYDATA`
+  from a lower integrity level only when Everything runs at a lower level than
+  the agent. Each query also uses a random 32-bit reply ID.
+- **It marks file names as untrusted.** Anyone who can create a file chooses
+  its name. The tool text escapes invisible and bidirectional characters, such
+  as U+202E, and the server tells the agent never to follow instructions in a
+  file name.
+
+The forced `sdk` and `es` backends do not verify the window owner. Set
+`EVERYTHING_MCP_VERIFY_IPC_OWNER=0` only if you cannot point `EVERYTHING_EXE`
+at the running Everything executable.
 
 Report vulnerabilities through the private process in [SECURITY.md](SECURITY.md).
 Do not attach credentials, private paths, or personal file contents to a public
@@ -501,14 +512,17 @@ py -m build
 
 The `v0.4.0` release candidate passed these local gates on Python 3.13:
 
-- 537 pytest cases, Ruff, and strict mypy across 37 source and test files;
+- 549 pytest cases, Ruff, and strict mypy across 38 source and test files;
 - native IPC results identical to the Everything SDK DLL for six query, sort,
   and metadata combinations on a live Everything 1.4.1 index;
 - live ASCII, Korean, and emoji file names through native IPC;
 - `scripts/measure_lite_sessions.ps1` with two lite and two FastMCP sessions:
   all 12 owned processes exited and the independent PID recheck was clean;
 - a Bandit scan with only low-severity notes for fixed-argument `subprocess`
-  calls without a shell.
+  calls without a shell;
+- an impersonation test: a separate process registered the Everything window
+  class and returned a fake path. With the owner check, the call failed before
+  the query was sent; without it, the fake path was accepted.
 
 Windows GitHub Actions verifies Python 3.11 and 3.14 for pushed commits and
 pull requests. See the

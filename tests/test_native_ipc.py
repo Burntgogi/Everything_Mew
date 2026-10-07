@@ -25,6 +25,7 @@ from everything_mcp.contracts import SearchHit
 from everything_mcp.errors import BackendUnavailableError, QueryError
 
 WINDOW = 0x1234
+OWNER = str(Path(__file__))
 FILETIME_2025 = 133801632000000000  # 2025-01-01T00:00:00Z
 
 
@@ -65,7 +66,9 @@ class FakeTransport:
         db_loaded: int | None = 1,
         window: int = WINDOW,
         indexed_info: frozenset[int] = frozenset(),
+        owner: str | None = OWNER,
     ) -> None:
+        self.owner = owner
         self.reply = reply
         self.db_loaded = db_loaded
         self.indexed_info = indexed_info
@@ -92,14 +95,19 @@ class FakeTransport:
             return 1 if l_param in self.indexed_info else 0
         return {0: 1, 1: 4, 2: 1, 3: 1024}.get(command, 0)
 
+    def owner_image(self, hwnd: int) -> str | None:
+        assert hwnd == WINDOW
+        return self.owner
+
     def query(self, hwnd: int, build_payload: Callable[[int, int], bytes], timeout_seconds: float) -> bytes | None:
         assert timeout_seconds > 0
         self.payloads.append(build_payload(0xABCDEF, 77))
         return self.reply
 
 
-def adapter_with(transport: FakeTransport, instance: str | None = None) -> NativeIpcAdapter:
-    return NativeIpcAdapter(EverythingConfig(everything_exe=Path(__file__), instance=instance), transport=transport)
+def adapter_with(transport: FakeTransport, instance: str | None = None, verify: bool = True) -> NativeIpcAdapter:
+    config = EverythingConfig(everything_exe=Path(OWNER), instance=instance, verify_ipc_owner=verify)
+    return NativeIpcAdapter(config, transport=transport)
 
 
 def test_query2_payload_matches_everything_ipc_layout() -> None:

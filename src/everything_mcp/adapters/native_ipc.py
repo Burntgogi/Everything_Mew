@@ -101,6 +101,8 @@ class IpcTransport(Protocol):
         self, hwnd: int, build_payload: Callable[[int, int], bytes], timeout_seconds: float
     ) -> bytes | None: ...
 
+    def owner_image(self, hwnd: int) -> str | None: ...
+
 
 class List2:
     """Parsed EVERYTHING_IPC_LIST2 reply."""
@@ -249,6 +251,31 @@ class NativeIpcAdapter:
     def is_reachable(self) -> bool:
         return self._window() != 0
 
+    def _owner_problem(self, hwnd: int) -> str | None:
+        """Refuse a window that the configured Everything executable does not own.
+
+        Any program running as the same user can register the Everything window
+        class. Checking the owning image against a path in an admin-protected
+        directory, such as Program Files, keeps such a program from reading
+        queries or returning false results.
+        """
+        if not self.config.verify_ipc_owner:
+            return None
+        try:
+            image = self._ipc().owner_image(hwnd)
+        except OSError:
+            image = None
+        expected = str(self.config.everything_exe)
+        if image is None:
+            return "Could not identify the process that owns the Everything IPC window; refusing to query it."
+        if _same_path(image, expected):
+            return None
+        return (
+            f"The Everything IPC window is owned by {image}, not the trusted EVERYTHING_EXE {expected}; refusing to "
+            "query it. Set EVERYTHING_EXE to the real Everything executable, or EVERYTHING_MCP_VERIFY_IPC_OWNER=0 "
+            "to disable this check."
+        )
+
     def _command(self, hwnd: int, command: int, l_param: int = 0) -> int | None:
         try:
             return self._ipc().send_command(hwnd, command, l_param, COMMAND_TIMEOUT_MILLISECONDS)
@@ -263,6 +290,10 @@ class NativeIpcAdapter:
         hwnd = self._window()
         if not hwnd:
             notes.append(f"Everything IPC window {self._class_name!r} was not found; start Everything and retry.")
+            return AdapterStatus(installed, False, "none", False, notes=tuple(notes))
+        problem = self._owner_problem(hwnd)
+        if problem:
+            notes.append(problem)
             return AdapterStatus(installed, False, "none", False, notes=tuple(notes))
         db_loaded = self._command(hwnd, IPC_IS_DB_LOADED)
         if db_loaded is None:
@@ -319,6 +350,9 @@ class NativeIpcAdapter:
             raise BackendUnavailableError(
                 f"Everything IPC window {self._class_name!r} was not found; start Everything and retry."
             )
+        problem = self._owner_problem(hwnd)
+        if problem:
+            raise BackendUnavailableError(problem)
         db_loaded = self._command(hwnd, IPC_IS_DB_LOADED)
         if db_loaded is None:
             raise BackendUnavailableError("Everything did not answer IPC within 2 seconds; retry shortly.")
@@ -463,6 +497,8 @@ def _user32() -> Any:
         user32.DefWindowProcW.restype = ctypes.c_ssize_t
         user32.ChangeWindowMessageFilterEx.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.DWORD, wintypes.LPVOID)
         user32.ChangeWindowMessageFilterEx.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
         user32.MsgWaitForMultipleObjectsEx.argtypes = (
             wintypes.DWORD,
             ctypes.POINTER(wintypes.HANDLE),
@@ -480,15 +516,139 @@ def _user32() -> Any:
     return _USER32
 
 
-def _instance_handle() -> Any:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
-    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-    return kernel32.GetModuleHandleW(None)
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+TOKEN_QUERY = 0x0008
+TOKEN_INTEGRITY_LEVEL = 25
+_KERNEL32: Any = None
+_ADVAPI32: Any = None
 
+
+def _kernel32() -> Any:
+    global _KERNEL32
+    if _KERNEL32 is None:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.GetCurrentProcess.argtypes = ()
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        _KERNEL32 = kernel32
+    return _KERNEL32
+
+
+def _advapi32() -> Any:
+    global _ADVAPI32
+    if _ADVAPI32 is None:
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.OpenProcessToken.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.GetSidSubAuthorityCount.argtypes = (ctypes.c_void_p,)
+        advapi32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+        advapi32.GetSidSubAuthority.argtypes = (ctypes.c_void_p, wintypes.DWORD)
+        advapi32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+        _ADVAPI32 = advapi32
+    return _ADVAPI32
+
+
+def _instance_handle() -> Any:
+    return _kernel32().GetModuleHandleW(None)
+
+
+def _same_path(left: str, right: str) -> bool:
+    import ntpath
+
+    return ntpath.normcase(ntpath.normpath(left)) == ntpath.normcase(ntpath.normpath(right))
+
+
+def _window_process(hwnd: int) -> Any:
+    """Open the process that owns a window for limited queries, or return None."""
+    pid = wintypes.DWORD(0)
+    _user32().GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return None
+    return _kernel32().OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value) or None
+
+
+def _process_image(process: Any) -> str | None:
+    size = wintypes.DWORD(MAX_WINDOWS_PATH_CHARACTERS + 1)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if not _kernel32().QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(size)):
+        return None
+    return buffer.value or None
+
+
+def _integrity_level(process: Any) -> int | None:
+    """Return the mandatory integrity RID of a process token, or None when unreadable."""
+    advapi32 = _advapi32()
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
+        return None
+    try:
+        size = wintypes.DWORD(0)
+        advapi32.GetTokenInformation(token, TOKEN_INTEGRITY_LEVEL, None, 0, ctypes.byref(size))
+        if not size.value:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(token, TOKEN_INTEGRITY_LEVEL, buffer, size, ctypes.byref(size)):
+            return None
+        sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        count = advapi32.GetSidSubAuthorityCount(sid)[0]
+        return int(advapi32.GetSidSubAuthority(sid, count - 1)[0]) if count else None
+    finally:
+        _kernel32().CloseHandle(token)
+
+
+def owner_has_lower_integrity(hwnd: int) -> bool:
+    """Return whether the window's process runs below this process's integrity level.
+
+    Only then must the reply window accept WM_COPYDATA across UIPI. Opening it
+    otherwise would let every lower-integrity program on the desktop send to it.
+    """
+    process = _window_process(hwnd)
+    if process is None:
+        return False
+    try:
+        target = _integrity_level(process)
+    finally:
+        _kernel32().CloseHandle(process)
+    current = _integrity_level(_kernel32().GetCurrentProcess())
+    return target is not None and current is not None and target < current
+
+
+def everything_needs_uipi_exception(class_name: str = EVERYTHING_IPC_WNDCLASS) -> bool:
+    """Return whether a reply window must accept WM_COPYDATA from the running Everything."""
+    hwnd = int(_user32().FindWindowW(class_name, None) or 0)
+    return bool(hwnd) and owner_has_lower_integrity(hwnd)
 
 
 class _Win32Transport:
+    def owner_image(self, hwnd: int) -> str | None:
+        process = _window_process(hwnd)
+        if process is None:
+            return None
+        try:
+            return _process_image(process)
+        finally:
+            _kernel32().CloseHandle(process)
+
     def find_window(self, class_name: str) -> int:
         return int(_user32().FindWindowW(class_name, None) or 0)
 
@@ -502,8 +662,8 @@ class _Win32Transport:
     def query(self, hwnd: int, build_payload: Callable[[int, int], bytes], timeout_seconds: float) -> bytes | None:
         with _LOCK:
             user32 = _user32()
-            reply_hwnd = self._create_reply_window(user32)
-            # Unpredictable: the reply window accepts WM_COPYDATA across UIPI, so a
+            reply_hwnd = self._create_reply_window(user32, owner_has_lower_integrity(hwnd))
+            # Unpredictable: when the reply window accepts WM_COPYDATA across UIPI, a
             # lower-integrity process must not be able to guess the expected reply ID.
             pending = _PendingReply(int.from_bytes(os.urandom(4), "little") or 1)
             _PENDING[reply_hwnd] = pending
@@ -533,7 +693,7 @@ class _Win32Transport:
                 user32.DestroyWindow(reply_hwnd)
 
     @staticmethod
-    def _create_reply_window(user32: Any) -> int:
+    def _create_reply_window(user32: Any, allow_lower_integrity: bool) -> int:
         global _CLASS_ATOM
         instance = _instance_handle()
         if not _CLASS_ATOM:
@@ -546,8 +706,9 @@ class _Win32Transport:
         )
         if not hwnd:
             raise OSError("Could not create the Everything IPC reply window.")
-        # Like the SDK: let a lower-integrity Everything reply to an elevated agent.
-        user32.ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, None)
+        if allow_lower_integrity:
+            # Like the SDK, but only when needed: let a lower-integrity Everything reply to an elevated agent.
+            user32.ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, None)
         return int(hwnd)
 
     @staticmethod
