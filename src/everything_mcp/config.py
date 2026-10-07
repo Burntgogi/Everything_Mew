@@ -3,25 +3,41 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 DEFAULT_EVERYTHING_EXE = Path(r"C:\Program Files\Everything\Everything.exe")
+BACKEND_ENV = "EVERYTHING_MCP_BACKEND"
+BACKEND_CHOICES = ("auto", "native", "sdk", "es")
+VERIFY_IPC_OWNER_ENV = "EVERYTHING_MCP_VERIFY_IPC_OWNER"
 
 
-@dataclass(frozen=True)
-class EverythingConfig:
+class EverythingConfig(NamedTuple):
     everything_exe: Path = DEFAULT_EVERYTHING_EXE
     sdk_dll: Path | None = None
     es_exe: Path | None = None
+    instance: str | None = None
+    backend: str = "auto"
+    # Native IPC refuses an Everything window that EVERYTHING_EXE does not own.
+    verify_ipc_owner: bool = True
 
     @classmethod
     def from_env(cls) -> "EverythingConfig":
         everything_exe = Path(os.environ.get("EVERYTHING_EXE", str(DEFAULT_EVERYTHING_EXE)))
         sdk_raw = os.environ.get("EVERYTHING_SDK_DLL")
         es_raw = os.environ.get("EVERYTHING_ES_EXE")
+        instance = os.environ.get("EVERYTHING_INSTANCE", "").strip() or None
+        backend = os.environ.get(BACKEND_ENV, "").strip().lower() or "auto"
+        if backend not in BACKEND_CHOICES:
+            raise ValueError(f"{BACKEND_ENV} must be one of: {', '.join(BACKEND_CHOICES)}")
+        verify_raw = os.environ.get(VERIFY_IPC_OWNER_ENV, "").strip() or "1"
+        if verify_raw not in ("0", "1"):
+            raise ValueError(f"{VERIFY_IPC_OWNER_ENV} must be 0 or 1")
         return cls(
             everything_exe=everything_exe,
             sdk_dll=Path(sdk_raw) if sdk_raw else None,
             es_exe=Path(es_raw) if es_raw else None,
+            instance=instance,
+            backend=backend,
+            verify_ipc_owner=verify_raw == "1",
         )

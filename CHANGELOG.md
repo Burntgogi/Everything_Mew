@@ -4,19 +4,166 @@ All notable release changes are documented here. / 주요 릴리스 변경 사�
 
 ## [Unreleased]
 
-- Add host-configured allowed roots and metadata controls to search and count
-  ([#8](https://github.com/Burntgogi/Everything_Mew/pull/8)). These controls are
-  absent from the `v0.3.0` tag despite the unchanged source package version.
-- Direct the installation guide to the policy-bearing main branch and check
-  for the installed policy before enabling a search host.
-- Reject device and extended-length path prefixes in allowed roots, scopes,
-  and restricted search results so local junction checks cannot be skipped.
-- 검색과 건수 조회에 호스트가 설정하는 허용 경로 및 메타데이터 제한을
-  추가했습니다. 소스의 패키지 버전은 그대로지만 `v0.3.0` 태그에는 이 기능이 없습니다.
-- 설치 안내에서 정책이 포함된 main 소스를 사용하고 검색 호스트 활성화 전
-  정책 설치 여부를 확인하도록 했습니다.
-- 허용 루트·검색 범위·제한 모드의 검색 결과에서 장치 및 확장 경로 접두사를
-  거부해 로컬 junction 검사가 생략되지 않도록 했습니다.
+## [0.4.0] - 2026-10-08
+
+The package version is `0.4.0` and its Git tag is `v0.4.0`. This release makes
+the Everything index the fast path for Windows agent file discovery. The four
+public tools keep their names and arguments.
+
+패키지 버전은 `0.4.0`, Git 태그는 `v0.4.0`입니다. 이 릴리스는 Everything
+인덱스를 Windows 에이전트 파일 탐색의 빠른 경로로 만듭니다. 공개 도구 네 개의
+이름과 인수는 그대로입니다.
+
+### English
+
+#### Why upgrade
+
+On a 603k-file user profile, an `everything_search` call took 0.11 to 0.18 s.
+Claude Code's Glob took 9 to 10 s, and a PowerShell walk took 26 to 29 s. In
+end-to-end `claude -p` runs, the "`.py` files changed today" task took 16.5 s
+with Everything_Mew and 216.7 s with built-in tools only. See the
+[2026-10 audit](docs/AUDIT_2026-10_LIFECYCLE_NATIVE_IPC.md#claude-code-benchmark)
+for the method and limits.
+
+#### Added
+
+- A dependency-free `native-ipc` backend that speaks the documented
+  Everything 1.4 IPC protocol directly. The Everything SDK DLL is no longer
+  required.
+- `totalCount` in `everything_search` results, from the same Everything reply.
+  One call now sizes and samples a result.
+- `fastSorts` in `everything_status` results.
+- `EVERYTHING_MCP_BACKEND` to force `native`, `sdk`, or `es`, and
+  `EVERYTHING_INSTANCE` for a named instance such as `1.5a`.
+- `EVERYTHING_MCP_EXECUTION`, `EVERYTHING_MCP_WORKER_TIMEOUT`, and
+  `EVERYTHING_MCP_IDLE_EXIT_SECONDS` to control the lite server lifecycle.
+- Host-configured allowed roots and metadata controls
+  ([#8](https://github.com/Burntgogi/Everything_Mew/pull/8)). Version 0.3.0
+  ignores these settings.
+
+#### Changed
+
+- The lite server runs each Everything tool call in a short-lived isolated
+  worker process. The worker returns its memory to Windows when it exits, and
+  a stuck worker is stopped after 30 s. After ten searches, the resident server
+  used 18.2 MB instead of 22.8 MB.
+- Backend failures, query failures, policy denials, and configuration errors
+  are tool errors: `isError=true` with an `error.code`. The one-shot runner
+  exits with `1`. An empty successful result still means that nothing matched.
+- When a query starts with an indexed filter and reads nothing from disk, the
+  server puts the scope after the query. Everything evaluates AND operands
+  from left to right, so a scoped `ext:py` search took 27 ms instead of 64 ms.
+- `everything_search` loads with the Claude Code session through
+  `_meta["anthropic/alwaysLoad"]`, so the agent does not spend a tool-search
+  turn. Its description teaches the Everything 1.4 syntax.
+- An empty result caused by a function that Everything 1.4 does not have, such
+  as `name:`, now includes a note that explains why.
+- Tool text content is compact JSON, and worker start-up imports less code.
+
+#### Fixed
+
+- Emoji and other names outside the Basic Multilingual Plane no longer fail
+  SDK DLL searches.
+- The lite server reads and writes UTF-8 on any Windows code page. Korean
+  queries are no longer corrupted, and emoji output no longer stops the server.
+- Elevated agents now receive replies from a non-elevated Everything, because
+  the reply window allows `WM_COPYDATA` through UIPI.
+- Device and extended-length path prefixes are rejected in allowed roots,
+  scopes, and restricted results
+  ([#9](https://github.com/Burntgogi/Everything_Mew/pull/9)).
+
+#### Security
+
+- Native IPC sends a query only to an Everything window that the
+  `EVERYTHING_EXE` process owns, and fails closed otherwise. A same-user
+  program that registers the Everything window class no longer receives
+  queries or injects results. `EVERYTHING_MCP_VERIFY_IPC_OWNER=0` disables the
+  check.
+- The reply window accepts `WM_COPYDATA` across UIPI only when Everything runs
+  at a lower integrity level than the agent.
+- Tool text escapes invisible and bidirectional characters in file names, and
+  the server instructions mark paths as untrusted data.
+- Every message to Everything uses `SendMessageTimeout`, so a hung Everything
+  cannot block a call without limit.
+- Native IPC replies use a random 32-bit reply ID and pass bounds checks.
+- Queries that read file contents, and size or date filters that Everything
+  does not index, always run after the scope.
+- The worker runs in isolated mode. It ignores `PYTHON*` variables and
+  `.pth` files, and it does not let site-packages shadow the standard library.
+
+### 한국어
+
+#### 업그레이드할 이유
+
+파일 60만 3천 개의 사용자 프로필에서 `everything_search` 호출은 0.11~0.18초가
+걸렸습니다. Claude Code의 Glob은 9~10초, PowerShell 순회는 26~29초가
+걸렸습니다. `claude -p`로 처음부터 끝까지 실행한 "오늘 수정된 `.py` 파일" 과제는
+Everything_Mew를 쓰면 16.5초, 기본 도구만 쓰면 216.7초였습니다. 측정 방법과
+한계는 [2026-10 감사 문서](docs/AUDIT_2026-10_LIFECYCLE_NATIVE_IPC.md#claude-code-benchmark)를
+참조하세요.
+
+#### 추가
+
+- 공개된 Everything 1.4 IPC 프로토콜을 직접 사용하는 의존성 없는 `native-ipc`
+  백엔드를 추가했습니다. 이제 Everything SDK DLL이 필요하지 않습니다.
+- `everything_search` 결과에 같은 Everything 응답에서 얻은 `totalCount`를
+  추가했습니다. 호출 한 번으로 결과 규모와 표본을 함께 얻습니다.
+- `everything_status` 결과에 `fastSorts`를 추가했습니다.
+- 백엔드를 `native`, `sdk`, `es`로 고정하는 `EVERYTHING_MCP_BACKEND`와
+  `1.5a` 같은 이름 있는 인스턴스용 `EVERYTHING_INSTANCE`를 추가했습니다.
+- lite 서버 수명 주기를 조절하는 `EVERYTHING_MCP_EXECUTION`,
+  `EVERYTHING_MCP_WORKER_TIMEOUT`, `EVERYTHING_MCP_IDLE_EXIT_SECONDS`를
+  추가했습니다.
+- 호스트가 설정하는 허용 경로와 메타데이터 제한을 추가했습니다
+  ([#8](https://github.com/Burntgogi/Everything_Mew/pull/8)). 0.3.0은 이 설정을
+  무시합니다.
+
+#### 변경
+
+- lite 서버는 Everything 도구 호출마다 수명이 짧은 격리 워커 프로세스를
+  실행합니다. 워커는 종료할 때 메모리를 Windows에 반환하고, 멈춘 워커는 30초
+  뒤 중단됩니다. 검색 10회 후 상주 서버 메모리는 22.8MB에서 18.2MB가 됐습니다.
+- 백엔드 실패, 쿼리 실패, 정책 거부, 설정 오류는 `error.code`가 있는
+  `isError=true` 도구 오류입니다. one-shot 실행기는 `1`로 종료합니다. 성공한 빈
+  결과는 여전히 일치하는 항목이 없다는 뜻입니다.
+- 쿼리가 색인된 필터로 시작하고 디스크를 읽지 않으면 범위를 쿼리 뒤에 둡니다.
+  Everything은 AND 피연산자를 왼쪽부터 평가하므로, 범위를 지정한 `ext:py` 검색이
+  64ms에서 27ms로 줄었습니다.
+- `everything_search`는 `_meta["anthropic/alwaysLoad"]`로 Claude Code 세션과 함께
+  로드되므로 에이전트가 도구 검색 턴을 쓰지 않습니다. 도구 설명은 Everything
+  1.4 문법을 알려 줍니다.
+- `name:`처럼 Everything 1.4에 없는 함수 때문에 결과가 비면 이유를 설명하는
+  메모를 붙입니다.
+- 도구 텍스트를 간결한 JSON으로 출력하고, 워커 시작 시 불러오는 코드를
+  줄였습니다.
+
+#### 수정
+
+- 이모지 등 BMP 밖 문자가 들어간 이름 때문에 SDK DLL 검색이 실패하지 않습니다.
+- lite 서버가 어떤 Windows 코드 페이지에서도 UTF-8로 읽고 씁니다. 한글 쿼리가
+  깨지지 않고, 이모지 출력으로 서버가 멈추지 않습니다.
+- 응답 창이 UIPI를 통과하는 `WM_COPYDATA`를 허용하므로, 관리자 권한 에이전트도
+  일반 권한 Everything의 응답을 받습니다.
+- 허용 경로, 범위, 제한 모드 결과에서 장치 경로와 확장 경로 접두사를
+  거부합니다([#9](https://github.com/Burntgogi/Everything_Mew/pull/9)).
+
+#### 보안
+
+- 네이티브 IPC는 `EVERYTHING_EXE` 프로세스가 소유한 Everything 창에만 쿼리를
+  보내고, 아니면 실패로 끝냅니다. Everything 창 클래스를 등록한 같은 사용자의
+  프로그램은 더 이상 쿼리를 받거나 결과를 끼워 넣지 못합니다.
+  `EVERYTHING_MCP_VERIFY_IPC_OWNER=0`으로 이 확인을 끌 수 있습니다.
+- 응답 창은 Everything이 에이전트보다 낮은 무결성 수준에서 실행될 때만 UIPI를
+  넘는 `WM_COPYDATA`를 받습니다.
+- 도구 텍스트는 파일 이름 속 보이지 않는 문자와 양방향 제어 문자를
+  이스케이프하고, 서버 지침은 경로를 신뢰할 수 없는 데이터로 표시합니다.
+- Everything에 보내는 모든 메시지는 `SendMessageTimeout`을 사용하므로, 멈춘
+  Everything이 호출을 무한정 막지 못합니다.
+- 네이티브 IPC 응답은 무작위 32비트 응답 ID를 쓰고 경계 검사를 거칩니다.
+- 파일 내용을 읽는 쿼리, 그리고 Everything이 색인하지 않는 크기·날짜 필터는
+  항상 범위 뒤에서 실행됩니다.
+- 워커는 격리 모드로 실행됩니다. `PYTHON*` 환경 변수와 `.pth` 파일을 무시하고,
+  site-packages가 표준 라이브러리를 가리지 못하게 합니다.
 
 ## [0.3.0] - 2026-08-13
 

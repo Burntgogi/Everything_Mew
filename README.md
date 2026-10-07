@@ -4,11 +4,11 @@
 
 <h1 align="center">Everything_Mew</h1>
 
-<p align="center"><strong>A lightweight, read-only MCP bridge to Everything for fast Windows file discovery.</strong></p>
+<p align="center"><strong>Index-backed file discovery for AI agents on Windows: find files in about 0.1 s where a directory walk takes 10 to 30 s.</strong></p>
 
 <p align="center">
   <a href="https://github.com/Burntgogi/Everything_Mew/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Burntgogi/Everything_Mew/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.3.0"><img alt="Stable v0.3.0" src="https://img.shields.io/badge/stable-v0.3.0-5865F2"></a>
+  <a href="https://github.com/Burntgogi/Everything_Mew/releases/tag/v0.4.0"><img alt="Stable v0.4.0" src="https://img.shields.io/badge/stable-v0.4.0-5865F2"></a>
   <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0078D4">
   <img alt="Python 3.11 through 3.14" src="https://img.shields.io/badge/Python-3.11--3.14-3776AB">
   <img alt="Read-only MCP tools" src="https://img.shields.io/badge/MCP-read--only-1F883D">
@@ -17,6 +17,7 @@
 
 <p align="center">
   <a href="README.ko.md">한국어</a> ·
+  <a href="#why-use-the-everything-index">Benchmarks</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#tools">Tools</a> ·
   <a href="#architecture">Architecture</a> ·
@@ -26,16 +27,72 @@
 
 ## Overview
 
-Everything_Mew connects AI agents to the existing local
-[Everything](https://www.voidtools.com/) index. It discovers candidate files and
-folders by name, path, extension, size, date, and attributes before more
-expensive content tools inspect them.
+Everything_Mew connects AI agents to the local
+[Everything](https://www.voidtools.com/) index. Everything already keeps every
+file and folder name of the indexed volumes in memory. Everything_Mew lets an
+agent query that index to find files by name, path, extension, size, and date.
+The agent then reads only the selected files with its normal tools.
+
+Coding agents usually find files by walking directories: Claude Code's Glob
+runs ripgrep over the tree, and shell fallbacks run `Get-ChildItem -Recurse`.
+A walk reads every directory on each call, so its time grows with the tree.
+An index query does not walk the tree, so its time stays near 0.1 s.
 
 The project is Windows-only and exposes four read-only MCP tools. It does not
-edit files, mutate the Everything index, or enable Everything's HTTP server.
+edit files, change the Everything index, or enable the Everything HTTP server.
 The repository also contains an optional agent skill with concise Everything
-syntax guidance; the Python wheel installs only the MCP runtime and console
-entrypoints.
+syntax guidance. The Python wheel installs only the MCP runtime and console
+entry points. The runtime has no third-party dependencies and needs no
+Everything SDK DLL.
+
+## Why use the Everything index
+
+We measured the search paths of Claude Code on one Windows 11 computer with
+Everything 1.4.1.1024 and about 8.8 million indexed files. Glob is Claude
+Code's embedded ripgrep, run with the exact arguments of its Glob tool.
+PowerShell is a recursive `Get-ChildItem`. Everything_Mew is one MCP tool call
+to a running `everything-mew-lite` server. Each value is a median of repeated
+runs.
+
+| Search | Glob | PowerShell | Everything_Mew |
+| --- | ---: | ---: | ---: |
+| `*.toml`, user profile (603k files) | 9.0 s | 25.7 s | **0.15 s** |
+| `pyproject.toml`, user profile (603k files) | 10.2 s | 25.8 s | **0.11 s** |
+| name contains `lite`, user profile (603k files) | 9.9 s | 28.8 s | **0.18 s** |
+| `.py` changed today, user profile (603k files) | not supported | 29.3 s | **0.18 s** |
+| `*.toml`, one repository (36k files) | 0.35 s | 1.2 s | **0.11 s** |
+
+The results matched where the methods are comparable: each method found the
+same 553 `.toml` files and the same 30 `pyproject.toml` files.
+
+We also ran the same tasks end to end with `claude -p` (Sonnet, two runs each):
+
+| Task | Built-in tools only | With Everything_Mew |
+| --- | --- | --- |
+| Find every `pyproject.toml` in the user profile | 27.2 s, 3 turns, one wrong count | **18.8 s, 2 turns, both correct** |
+| Find `.py` files changed today in the user profile | 216.7 s, one wrong answer | **16.5 s, 2 turns, both correct** |
+| List `.toml` files in one repository | **7.3 s** | 11.2 s |
+
+What this means for Windows agent work:
+
+- **Large or unknown locations gain the most.** A user profile, several
+  projects, or "somewhere on this drive" take seconds to minutes to walk.
+  Everything answers in a fraction of a second, so the agent stops waiting on
+  file discovery.
+- **Date and size questions become one call.** Glob cannot filter by date or
+  size. Without the index, the agent writes a slow shell pipeline, and in our
+  runs that pipeline gave a wrong answer.
+- **Fewer and cheaper turns.** One `everything_search` call returns the paths
+  and `totalCount`, so the agent does not need a separate count call.
+- **Small known folders do not gain.** Inside one repository, Glob is already
+  fast. The remaining gap in the last row is start-up: `claude -p` spends
+  about 3 s connecting to any MCP server, while the Everything_Mew handshake
+  takes 0.12 s. An interactive session pays this cost once, not per search.
+
+The full method, raw numbers, and limits are in
+[the 2026-10 audit](docs/AUDIT_2026-10_LIFECYCLE_NATIVE_IPC.md#claude-code-benchmark).
+Your numbers depend on the disk, the tree size, and Everything's index
+settings.
 
 ## How it works
 
@@ -43,23 +100,27 @@ Use Everything_Mew as a low-token discovery layer, then switch to the normal
 content or code tool for the selected paths:
 
 ```text
-everything_count -> everything_search -> read/grep/ast-grep/LSP on selected paths
+everything_search (check totalCount) -> read/grep/ast-grep/LSP on selected paths
 ```
 
-- `everything_count` checks result volume without materializing paths.
 - `everything_search` returns compact path-first candidates with optional
-  metadata.
+  metadata, plus `totalCount`: Everything's full match count from the same
+  query, so one call both sizes and samples the result.
+- `everything_count` checks result volume without materializing any paths.
 - `read`, `grep`, `ast-grep`, and LSP remain responsible for file contents and
   code semantics.
 
 For Codex, the recommended path is the agent skill plus
-`everything-mew-once`. Each request starts one short-lived process tree,
-returns one result, and exits, so no Everything_Mew Python process remains while
-unused. The shared `Everything.exe` indexer continues running. OpenCode and
-manual MCP hosts can keep using `everything-mew-lite`; that compatibility mode
-may retain one server process tree per host session. One-shot removes that idle
-multiplication but does not claim a fixed peak-memory value during active
-searches.
+`everything-mew-once`. Each request starts one short-lived process, returns one
+result, and exits, so no Everything_Mew Python process remains while unused.
+The shared `Everything.exe` indexer continues running.
+
+OpenCode, Claude Code, and other MCP hosts use `everything-mew-lite`. The host
+keeps that stdio process for its session, so it is kept as a small protocol
+broker: every Everything tool call runs in a fresh one-shot worker process that
+exits after answering. The worker's memory returns to Windows after each call,
+and a stuck call is stopped by killing its worker. See
+[Runtime lifecycle](#runtime-lifecycle).
 
 ## Quick start
 
@@ -68,45 +129,58 @@ searches.
 You need:
 
 - Windows with the standard Everything application installed and running;
-- CPython 3.11 through 3.14;
-- the official Everything SDK DLL matching Python's architecture:
-  `Everything64.dll` for 64-bit Python or `Everything32.dll` for 32-bit Python.
+- CPython 3.11 through 3.14.
 
-Everything Lite is not supported because it does not expose the required IPC
-interface. Download the SDK from the
-[official Everything SDK page](https://www.voidtools.com/support/everything/sdk/)
-and keep the DLL in a trusted local support directory. The DLL is not bundled
-with this repository or its Python package.
+Everything Lite is not supported because it does not expose the IPC interface.
+You do not need the Everything SDK DLL: Everything_Mew speaks the documented
+Everything IPC protocol itself. If Everything is not installed at
+`C:\Program Files\Everything\Everything.exe`, set `EVERYTHING_EXE` to its
+executable. The server only talks to an Everything window that this
+executable owns.
 
-### 2. Install the source revision with allowed-root controls
+### 2. Install version 0.4.0 or later
 
-The policy settings below require the unreleased allowed-root change from
-[PR #8](https://github.com/Burntgogi/Everything_Mew/pull/8). The latest stable
-tag, `v0.3.0`, does **not** enforce these settings. Install from `main` when
-following this guide:
+Version 0.4.0 is the first release that enforces the allowed-root policy.
+Version 0.3.0 ignores the policy settings below. Install the `v0.4.0` tag:
 
 ```powershell
 git clone https://github.com/Burntgogi/Everything_Mew.git
 cd Everything_Mew
-git checkout --detach origin/main
+git checkout --detach v0.4.0
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install .
 .\.venv\Scripts\python.exe -c "from everything_mcp.policy import SearchPolicy; assert SearchPolicy().denial_reason(None) is not None; print('Allowed-root policy available')"
 ```
 
-Stop if the policy check fails. Reinstall from the source checkout above before
-enabling a search host. Its package version is still `0.3.0`, so the version
-number alone does not establish that the policy is installed.
+Stop if the policy check fails. Do not enable a search host until the check
+passes.
 
-### 3. Use the one-shot runner from Codex
+### 3. Register the lite server in Claude Code
 
-The DLL value below is an example placeholder. Replace it with the exact
-forward-slash path to the trusted, architecture-matching SDK DLL selected on
-your computer. Make the installed command available to the Codex process, then
-resolve it to an absolute path before each invocation:
+Set the directories the server may search as a user environment variable. The
+value is a JSON array of absolute paths. Claude Code passes its environment to
+the server.
 
 ```powershell
-$env:EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
+[Environment]::SetEnvironmentVariable('EVERYTHING_MCP_ALLOWED_ROOTS', '["C:\\Users\\me","D:\\Projects"]', 'User')
+$lite = (Resolve-Path ".\.venv\Scripts\everything-mew-lite.exe").Path
+claude mcp add everything-mew -s user -- $lite
+```
+
+Do not pass the JSON with `claude mcp add -e` from Windows PowerShell 5.1.
+That shell removes the double quotes from native command arguments, and the
+server then rejects the value.
+
+Open a new terminal, start Claude Code, and ask for a file search. The
+`everything_search` tool loads with the session, so the agent can use it
+without a tool-search turn.
+
+### 4. Use the one-shot runner from Codex
+
+Make the installed command available to the Codex process. Resolve it to an
+absolute path before each invocation:
+
+```powershell
 $env:EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 $runner = (Resolve-Path ".\.venv\Scripts\everything-mew-once.exe").Path
 $request = @{
@@ -133,18 +207,17 @@ tool_timeout_sec = 20
 enabled_tools = ["everything_status", "everything_count", "everything_search", "everything_syntax_help"]
 
 [mcp_servers.everything-mew.env]
-EVERYTHING_SDK_DLL = "C:/replace/with/the/selected/sdk-dll"
 EVERYTHING_MCP_ALLOWED_ROOTS = '["C:\\Work\\project"]'
 ```
 
 `enabled = false` makes the MCP unavailable; it does not sleep and wake on
 demand. After changing this setting, fully restart Codex. Servers already owned
-by a running Codex or OpenCode host exit only when that host closes. Confirm
-that the one-shot `everything_status` result reports `sdk-ipc`, a loaded
-database, and matching Python architecture before searching.
+by a running Codex or OpenCode host exit only when that host closes. Before you
+search, confirm that the one-shot `everything_status` result reports
+`native-ipc` and a loaded database.
 
-For OpenCode, keep the SDK path in the parent environment and use its literal
-environment placeholder:
+For OpenCode, keep the allowed roots in the parent environment and use its
+literal environment placeholder:
 
 ```json
 {
@@ -154,13 +227,16 @@ environment placeholder:
       "command": ["everything-mew-lite"],
       "enabled": true,
       "environment": {
-        "EVERYTHING_SDK_DLL": "{env:EVERYTHING_SDK_DLL}",
         "EVERYTHING_MCP_ALLOWED_ROOTS": "{env:EVERYTHING_MCP_ALLOWED_ROOTS}"
       }
     }
   }
 }
 ```
+
+To use the Everything SDK DLL instead of native IPC, set `EVERYTHING_SDK_DLL`
+to a trusted DLL that matches the Python architecture and set
+`EVERYTHING_MCP_BACKEND=sdk`.
 
 For the complete path-validation, installation, and smoke-test procedure, see
 the [agent installation guide](docs/AGENT_INSTALLATION_GUIDE.md) and the
@@ -191,8 +267,8 @@ it.
 | Tool | Purpose |
 | --- | --- |
 | `everything_status` | Reports Everything, database, architecture, and selected backend readiness. |
-| `everything_count` | Counts a bounded query before any candidate paths are returned. |
-| `everything_search` | Returns compact, path-first candidates with optional metadata. |
+| `everything_count` | Counts a bounded query without returning paths. |
+| `everything_search` | Returns compact, path-first candidates, `totalCount`, and optional metadata. |
 | `everything_syntax_help` | Provides short, version-aware Everything query guidance. |
 
 All four tools are read-only. The public MCP contract intentionally stops at
@@ -202,8 +278,9 @@ candidate discovery.
 
 - **Operating system:** Windows.
 - **Everything:** the standard application must be installed and running.
-- **Everything SDK:** a trusted DLL matching Python's 32-bit or 64-bit
-  architecture is required for the primary SDK/IPC backend.
+- **Everything SDK:** optional. The default native IPC backend needs no DLL;
+  a trusted DLL matching Python's architecture is used only when
+  `EVERYTHING_SDK_DLL` is configured.
 - **Python:** CPython 3.11, 3.12, 3.13, or 3.14.
 - **MCP host:** Codex Desktop or another host with local stdio MCP support.
 - **Network services:** Everything HTTP is not required and is never enabled
@@ -269,30 +346,89 @@ documentation for the complete grammar.
 AI agent
   -> one-shot process or MCP compatibility host
   -> Everything_Mew read-only tools
-  -> SDK/IPC adapter
+  -> native IPC adapter (SDK DLL or ES CLI as fallbacks)
   -> Everything runtime
   -> Existing Everything index
   -> compact path candidates
   -> read/grep/ast-grep/LSP for selected files
 ```
 
-The primary adapter uses the official asynchronous SDK reply-window flow with a
-bounded 15-second wait, process-wide SDK serialization, unique reply IDs, and
-state reset after operations. `everything_count` requests only the total count
-with zero result flags and `Everything_SetMax(0)`.
+The primary adapter speaks the documented Everything 1.4 IPC protocol
+(`everything_ipc.h`) itself: one `QUERY2` request and one `LIST2` reply copied
+and parsed with bounds checks. Compared with the SDK DLL it follows the same
+wire rules but sends every message with `SendMessageTimeout` (the SDK uses an
+unbounded `SendMessage`), allows `WM_COPYDATA` through UIPI on its reply window
+so elevated agents still get replies, uses a unique reply ID per query with a
+bounded 15-second wait, and keeps no global SDK state to reset.
+`everything_count` requests only the total count with zero result flags and a
+maximum of zero results, like `Everything_SetMax(0)`. `everything_search`
+reports the reply's total count as `totalCount`.
+
+Everything evaluates AND operands from left to right, and the trusted scope is a
+full-path match. The server puts the grouped query before the scope only when
+both conditions are true:
+
+- the query starts with an indexed filter: `ext:`, `wfn:`, `file:`, `folder:`,
+  an anchored wildcard such as `name*` or `*.py`, or `size:` and `dm:` when
+  Everything reports that size and date modified are indexed;
+- no term reads from disk, such as `content:` or `from-disk:`.
+
+In all other cases the scope comes first, so Everything narrows to the scope
+before it does slower work. Both orders give the same results. On a 1.4.1 index,
+a scoped `ext:py` search took about 27 ms instead of 64 ms.
 
 The one-shot path validates one bounded JSON request, reuses the same tool
 dispatcher, publishes one result, and exits. It adds no daemon, HTTP listener,
 or process pool.
 
 The lite MCP path implements the small required stdio lifecycle directly:
-`initialize`, notifications, `ping`, `tools/list`, and `tools/call`. The
-FastMCP server remains an optional compatibility layer over the same tool
-functions and adapters.
+`initialize`, notifications, `ping`, `tools/list`, and `tools/call`, reading
+and writing UTF-8 regardless of the Windows code page. The FastMCP server
+remains an optional compatibility layer over the same tool functions and
+adapters.
+
+### Runtime lifecycle
+
+`everything-mew-lite` is a broker. It validates arguments, answers
+`everything_syntax_help` from static text, and runs every other tool call in a
+worker: the base Python interpreter in isolated mode (`-I -S`, no venv
+redirector, no `.pth` processing, no `PYTHON*` variables) executing the
+one-shot runner. The worker loads ctypes and the adapter, queries Everything,
+prints one result, and exits, so its memory goes back to Windows.
+
+| Mode | Resident broker after 10 searches | Per-call latency |
+| --- | --- | --- |
+| 0.3.x in-process lite | 22.8 MB working set, retained | about 88 ms |
+| Worker (default) | 18.2 MB working set | about 110 ms, worker peak about 17 MB freed on exit |
+| `EVERYTHING_MCP_EXECUTION=inprocess` | 20.5 MB working set, retained | about 34 ms |
+
+Measured on Windows 11, Python 3.13, Everything 1.4.1.1024, with a scoped
+`ext:py` search returning 20 paths. Treat these as one machine's evidence,
+not guarantees.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `EVERYTHING_MCP_EXECUTION` | `worker` | `inprocess` keeps the backend loaded in the server for lower latency. |
+| `EVERYTHING_MCP_WORKER_TIMEOUT` | `30` | Seconds before a worker is killed and the call fails with `isError=true`. |
+| `EVERYTHING_MCP_IDLE_EXIT_SECONDS` | unset | Exit the lite server after this many idle seconds. Only use it with hosts that restart stdio servers on demand. |
+| `EVERYTHING_MCP_BACKEND` | `auto` | `native`, `sdk`, or `es` forces one backend. |
+| `EVERYTHING_INSTANCE` | unset | Named Everything instance, for example `1.5a`. |
+| `EVERYTHING_EXE` | `C:\Program Files\Everything\Everything.exe` | The trusted Everything executable. Native IPC refuses a window that another program owns. |
+| `EVERYTHING_MCP_VERIFY_IPC_OWNER` | `1` | `0` disables the window owner check. |
+
+Failed calls are tool errors, not empty results: backend unavailability, query
+failures, policy denials, and configuration errors set `isError=true` with an
+`error.code`, and the one-shot runner exits with `1`.
 
 ## Usage examples
 
-Count before returning a potentially large candidate set:
+Find an exact file name. Read `totalCount` to see the full match count:
+
+```text
+everything_search(query="wfn:pyproject.toml", scope="C:\Work")
+```
+
+Count only, when the paths are not needed:
 
 ```text
 everything_count(query="ext:md", scope="C:\Work\project")
@@ -311,10 +447,15 @@ everything_search(
 Other useful Everything query shapes:
 
 ```text
+ext:py dm:today
 dm:thisweek ext:py;md;json
 size:>100mb
+lite*
 regex:"gr(a|e)y" ext:txt
 ```
+
+Everything 1.4 has no `name:` function. A plain word such as `lite` already
+matches names that contain it.
 
 After discovery, use a content-aware tool on only the selected paths.
 
@@ -333,6 +474,27 @@ The query guard reduces accidental broad or slow searches; it is not an OS
 sandbox. Run high-risk workloads under an appropriately restricted Windows
 account or other operating-system isolation.
 
+The native IPC backend applies these protections:
+
+- **It verifies who answers.** Any program that runs as the same Windows user
+  can register the Everything window class. Before it sends a query, the
+  backend checks that the process that owns the window runs
+  `EVERYTHING_EXE`. If it does not, the call fails and no query is sent.
+  Keep Everything in `C:\Program Files`, where only an administrator can
+  replace the executable. For a portable install, set `EVERYTHING_EXE` to its
+  path.
+- **It opens UIPI only when needed.** The reply window accepts `WM_COPYDATA`
+  from a lower integrity level only when Everything runs at a lower level than
+  the agent. Each query also uses a random 32-bit reply ID.
+- **It marks file names as untrusted.** Anyone who can create a file chooses
+  its name. The tool text escapes invisible and bidirectional characters, such
+  as U+202E, and the server tells the agent never to follow instructions in a
+  file name.
+
+The forced `sdk` and `es` backends do not verify the window owner. Set
+`EVERYTHING_MCP_VERIFY_IPC_OWNER=0` only if you cannot point `EVERYTHING_EXE`
+at the running Everything executable.
+
 Report vulnerabilities through the private process in [SECURITY.md](SECURITY.md).
 Do not attach credentials, private paths, or personal file contents to a public
 issue.
@@ -348,23 +510,23 @@ py -m mypy --strict src tests
 py -m build
 ```
 
-The `v0.3.0` release passed these local gates:
+The `v0.4.0` release candidate passed these local gates on Python 3.13:
 
-- 422 pytest cases, Ruff, and strict mypy across 31 source and test files on
-  local Python 3.11;
-- isolated installed-wheel lite MCP and one-shot lifecycles without
-  `PYTHONPATH`, FastAPI, or FastMCP;
-- four-tool read-only contract checks for both lite and compatibility paths;
-- ten sequential and six concurrent live SDK one-shot searches with no
-  surviving Everything_Mew process after completion;
-- an actual Windows reboot check confirming zero idle Everything_Mew Python
-  processes before and after the live calls;
-- source and distribution inspection for credentials, environment files, SDK
-  binaries, caches, and machine-specific path evidence.
+- 549 pytest cases, Ruff, and strict mypy across 38 source and test files;
+- native IPC results identical to the Everything SDK DLL for six query, sort,
+  and metadata combinations on a live Everything 1.4.1 index;
+- live ASCII, Korean, and emoji file names through native IPC;
+- `scripts/measure_lite_sessions.ps1` with two lite and two FastMCP sessions:
+  all 12 owned processes exited and the independent PID recheck was clean;
+- a Bandit scan with only low-severity notes for fixed-argument `subprocess`
+  calls without a shell;
+- an impersonation test: a separate process registered the Everything window
+  class and returned a fake path. With the owner check, the call failed before
+  the query was sent; without it, the fake path was accepted.
 
 Windows GitHub Actions verifies Python 3.11 and 3.14 for pushed commits and
 pull requests. See the
-[v0.3.0 release notes](docs/releases/v0.3.0.md) for the final
+[v0.4.0 release notes](docs/releases/v0.4.0.md) for the final
 results and [CONTRIBUTING.md](CONTRIBUTING.md) for reproducible build and
 installed-wheel verification commands.
 
@@ -374,15 +536,17 @@ installed-wheel verification commands.
 | --- | --- | --- | --- |
 | 0.1 | Original FastMCP-based baseline | `0.1.0` | `v0.1.0` |
 | 0.2 | Stable low-standby MCP release | `0.2.0` | `v0.2.0` |
-| 0.3 | Current stable one-shot release | `0.3.0` | `v0.3.0` |
+| 0.3 | One-shot release | `0.3.0` | `v0.3.0` |
+| 0.4 | Current stable native IPC release | `0.4.0` | `v0.4.0` |
 
-Version 0.3 adds bounded one-shot commands and makes them the default Codex
-workflow. The lite stdio server remains available for OpenCode and manual MCP
-compatibility, and all four public tools remain unchanged.
+Version 0.4 removes the Everything SDK DLL requirement, runs each lite tool
+call in a short-lived worker that returns its memory, and enforces the
+allowed-root policy. The four public tools keep their names and arguments.
+`everything_search` adds `totalCount`, and failures now report `isError=true`.
 
 Read the bilingual notes for [v0.1.0](docs/releases/v0.1.0.md),
-[v0.2.0](docs/releases/v0.2.0.md), and the current
-[v0.3.0](docs/releases/v0.3.0.md) release. The complete bilingual
+[v0.2.0](docs/releases/v0.2.0.md), [v0.3.0](docs/releases/v0.3.0.md), and the
+current [v0.4.0](docs/releases/v0.4.0.md) release. The complete bilingual
 history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Repository contents

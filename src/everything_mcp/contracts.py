@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
-BackendName = Literal["sdk-ipc", "es-cli", "http", "none"]
+BackendName = Literal["native-ipc", "sdk-ipc", "es-cli", "http", "none"]
 SortName = Literal["name", "path", "size", "date_modified"]
 TargetMachineName = Literal["x86", "x64", "ARM", "ARM64"]
 
@@ -15,8 +14,7 @@ HARD_LIMIT = 100
 BROAD_RESULT_THRESHOLD = 1000
 
 
-@dataclass(frozen=True)
-class AdapterStatus:
+class AdapterStatus(NamedTuple):
     everything_installed: bool
     everything_running: bool
     backend: BackendName
@@ -26,6 +24,7 @@ class AdapterStatus:
     db_loaded: bool | None = None
     version: str | None = None
     target_machine: TargetMachineName | None = None
+    fast_sorts: tuple[str, ...] | None = None
 
     def to_tool_result(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -42,11 +41,12 @@ class AdapterStatus:
             result["version"] = self.version
         if self.target_machine is not None:
             result["targetMachine"] = self.target_machine
+        if self.fast_sorts is not None:
+            result["fastSorts"] = list(self.fast_sorts)
         return result
 
 
-@dataclass(frozen=True)
-class SearchHit:
+class SearchHit(NamedTuple):
     path: str
     size: int | None = None
     date_modified: str | None = None
@@ -63,13 +63,21 @@ class SearchHit:
         return item
 
 
-@dataclass(frozen=True)
-class SearchBatch:
+class _SearchBatchFields(NamedTuple):
     hits: tuple[SearchHit, ...]
     notes: tuple[str, ...] = ()
+    total_count: int | None = None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "hits", tuple(self.hits))
+
+class SearchBatch(_SearchBatchFields):
+    """Immutable search hits plus diagnostics and Everything's total match count."""
+
+    __slots__ = ()
+
+    def __new__(
+        cls, hits: Sequence[SearchHit], notes: Sequence[str] = (), total_count: int | None = None
+    ) -> "SearchBatch":
+        return super().__new__(cls, tuple(hits), tuple(notes), total_count)
 
 
 def clamp_limit(limit: int | None) -> int:

@@ -106,7 +106,8 @@ def test_count_and_metadata_use_the_same_policy(monkeypatch: MonkeyPatch) -> Non
 
 
 def test_query_groups_every_or_branch_under_the_scope() -> None:
-    assert query.compose_query("ext:md | ext:txt", r"C:\Work") == '"C:\\Work\\" <ext:md | ext:txt>'
+    assert query.compose_query("ext:md | ext:txt", r"C:\Work") == '<ext:md | ext:txt> "C:\\Work\\"'
+    assert query.compose_query("README | ext:txt", r"C:\Work") == '"C:\\Work\\" <README | ext:txt>'
 
 
 def test_explicit_unscoped_mode_restores_index_search_without_allowed_roots(monkeypatch: MonkeyPatch) -> None:

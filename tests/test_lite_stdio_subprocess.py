@@ -511,7 +511,7 @@ def test_lite_stdio_runs_six_isolated_repeated_sessions_and_exits_at_eof() -> No
             status = assert_successful_tool_response(response_by_id[f"{cycle_prefix}:status"])
             assert isinstance(status["everythingInstalled"], bool)
             assert isinstance(status["everythingRunning"], bool)
-            assert status["backend"] in {"sdk-ipc", "es-cli", "http", "none"}
+            assert status["backend"] in {"native-ipc", "sdk-ipc", "es-cli", "http", "none"}
 
             count = assert_successful_tool_response(response_by_id[f"{cycle_prefix}:count"])
             assert count == {
@@ -612,6 +612,8 @@ def test_measurement_script_resolves_default_repo_before_clear_sdk_preflight_fai
         capture_output=True,
         text=True,
         encoding="utf-8",
+        # Windows PowerShell writes host errors in the console code page (for example CP949).
+        errors="replace",
         timeout=10,
         check=False,
     )

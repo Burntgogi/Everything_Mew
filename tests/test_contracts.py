@@ -62,7 +62,7 @@ def test_final_release_metadata_and_notes_are_consistent() -> None:
     with (root / "pyproject.toml").open("rb") as pyproject_file:
         pyproject = tomllib.load(pyproject_file)
 
-    assert pyproject["project"]["version"] == "0.3.0"
+    assert pyproject["project"]["version"] == "0.4.0"
     assert "ruff>=0.15,<0.16" in pyproject["project"]["optional-dependencies"]["dev"]
     sdist_includes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
     assert "/.gitattributes" in sdist_includes
@@ -72,10 +72,10 @@ def test_final_release_metadata_and_notes_are_consistent() -> None:
     assert "* text=auto eol=lf" in attributes
 
     expected_release_references = {
-        "README.md": ("v0.3.0", "Current stable one-shot release"),
-        "README.ko.md": ("v0.3.0", "현재 안정 one-shot 릴리스"),
-        "CHANGELOG.md": ("[0.3.0]", "[0.3.0-rc.1]"),
-        "SECURITY.md": ("`0.3.x`", "Current supported / 현재 지원"),
+        "README.md": ("v0.4.0", "Current stable native IPC release"),
+        "README.ko.md": ("v0.4.0", "현재 안정 네이티브 IPC 릴리스"),
+        "CHANGELOG.md": ("[0.4.0]", "[0.3.0]", "[0.3.0-rc.1]"),
+        "SECURITY.md": ("`0.4.x`", "Current supported / 현재 지원"),
     }
     for relative_path, references in expected_release_references.items():
         document = (root / relative_path).read_text(encoding="utf-8")
@@ -88,6 +88,7 @@ def test_final_release_metadata_and_notes_are_consistent() -> None:
         "v0.2.0.md",
         "v0.3.0-rc.1.md",
         "v0.3.0.md",
+        "v0.4.0.md",
     ):
         assert (root / "docs" / "releases" / release_note).is_file()
 
@@ -104,8 +105,11 @@ def test_repository_skill_is_codex_named_and_matches_supported_syntax_profile() 
     assert "from-disk:" in skill
     assert "content*:" in skill
     assert "$runner = 'C:\\replace\\with\\absolute\\path\\to\\everything-mew-once.exe'" in skill
-    assert "$env:EVERYTHING_SDK_DLL = 'C:\\replace\\with\\absolute\\path\\to\\EverythingSDK.dll'" in skill
-    assert "Test-Path -LiteralPath $env:EVERYTHING_SDK_DLL -PathType Leaf" in skill
+    # Native IPC needs no SDK DLL, so the runner snippet must not demand one.
+    assert "Test-Path -LiteralPath $env:EVERYTHING_SDK_DLL" not in skill
+    assert "no Everything SDK DLL is required" in skill
+    assert "totalCount" in skill
+    assert "backend_unavailable" in skill
     assert "Get-Command everything-mew-once" not in skill
     assert "schemaVersion = 1" in skill
     assert "ConvertTo-Json -Compress -Depth 4" in skill

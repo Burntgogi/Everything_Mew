@@ -155,14 +155,83 @@ def test_regex_is_not_reported_as_a_positive_indexed_filter() -> None:
 @pytest.mark.parametrize(
     ("scope", "expected"),
     (
-        (r"C:\Work", '"C:\\Work\\" <ext:md>'),
-        ("C:\\Program Files\\", '"C:\\Program Files\\" <ext:md>'),
-        ("C:/Work/project/", '"C:\\Work\\project\\" <ext:md>'),
-        (r"\\server\share\project", '"\\\\server\\share\\project\\" <ext:md>'),
+        (r"C:\Work", '<ext:md> "C:\\Work\\"'),
+        ("C:\\Program Files\\", '<ext:md> "C:\\Program Files\\"'),
+        ("C:/Work/project/", '<ext:md> "C:\\Work\\project\\"'),
+        (r"\\server\share\project", '<ext:md> "\\\\server\\share\\project\\"'),
     ),
 )
 def test_scope_composition_uses_an_exact_recursive_folder_boundary(scope: str, expected: str) -> None:
     assert query_module.compose_query("ext:md", scope) == expected
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "ext:py",
+        "ext:py lite",
+        "!ext:py ext:md",
+        "ext:py|ext:md",
+        "size:>1mb",
+        "dm:thisweek ext:py",
+        "folder:",
+        "file: ext:md",
+        "wfn:pyproject.toml",
+        "lite*",
+        "*.py",
+        "<ext:py lite>|size:>1mb",
+    ),
+)
+def test_scope_follows_a_leading_indexed_filter(query: str) -> None:
+    # Everything evaluates AND operands left to right; a cheap indexed filter
+    # should run before the full-path scope match. Grouping keeps OR bound.
+    indexed = frozenset({"size", "date_modified"})
+    assert query_module.compose_query(query, r"C:\Work", indexed) == f'<{query}> "C:\\Work\\"'
+
+
+@pytest.mark.parametrize("query", ("size:>1mb", "dm:thisweek ext:py", "<size:>1mb>|ext:py"))
+def test_property_filters_lead_only_when_everything_indexes_them(query: str) -> None:
+    # An unindexed property is read from disk for every candidate, so the scope must narrow first.
+    assert query_module.compose_query(query, r"C:\Work") == f'"C:\\Work\\" <{query}>'
+    assert query_module.compose_query(query, r"C:\Work", frozenset({"size"}))[0] == (
+        "<" if not query.startswith("dm:") else '"'
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "ext:txt content:needle",
+        "ext:txt utf8content:needle",
+        "ext:py binary:content:needle",
+        "ext:md ansi-content:needle",
+        "size:>1mb from-disk:dm:today",
+        "ext:txt <a | content:needle>",
+    ),
+)
+def test_scope_always_leads_a_query_that_reads_file_contents(query: str) -> None:
+    # Before the scope, a content term would read every matching file in the whole index.
+    indexed = frozenset({"size", "date_modified"})
+    assert query_module.compose_query(query, r"C:\Work", indexed) == f'"C:\\Work\\" <{query}>'
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "lite",
+        "lite ext:py",
+        "ext:py|lite",
+        "*lite*",
+        "file:lite",
+        "dc:2026",
+        "regex:^a ext:py",
+        '"ext:py"',
+        r"C:\x\a*.py",
+        "content:needle ext:txt",
+    ),
+)
+def test_scope_leads_when_the_first_operand_is_a_substring_scan(query: str) -> None:
+    assert query_module.compose_query(query, r"C:\Work") == f'"C:\\Work\\" <{query}>'
 
 
 @pytest.mark.parametrize(
@@ -382,7 +451,7 @@ def test_es_cli_uses_subprocess_without_shell(monkeypatch: MonkeyPatch) -> None:
     assert calls[0]["shell"] is False
     assert calls[0]["timeout"] == es_cli.DEFAULT_ES_TIMEOUT_SECONDS
     assert calls[0]["args"][0] == r"C:\Tools\es.exe"
-    assert calls[0]["args"][-1] == '"C:\\Work\\" <ext:md>'
+    assert calls[0]["args"][-1] == '<ext:md> "C:\\Work\\"'
 
 
 def test_es_cli_bad_count_raises_actionable_query_error(monkeypatch: MonkeyPatch) -> None:
@@ -439,7 +508,7 @@ def test_es_cli_timeout_raises_query_error(monkeypatch: MonkeyPatch) -> None:
 def test_es_cli_spaced_scope_is_quoted() -> None:
     adapter = es_cli.EsCliAdapter(Path(r"C:\Tools\es.exe"))
 
-    assert adapter._compose_query("ext:exe", r"C:\Program Files") == '"C:\\Program Files\\" <ext:exe>'
+    assert adapter._compose_query("ext:exe", r"C:\Program Files") == '<ext:exe> "C:\\Program Files\\"'
 
 
 def test_sdk_adapter_configures_ctypes_signatures() -> None:

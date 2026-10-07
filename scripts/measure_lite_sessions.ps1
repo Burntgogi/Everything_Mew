@@ -1982,6 +1982,8 @@ function Start-McpSession {
         $sourcePath
     }
     $startInfo.EnvironmentVariables["EVERYTHING_SDK_DLL"] = $SdkPath
+    # This script measures the SDK DLL backend; auto selection would prefer native IPC.
+    $startInfo.EnvironmentVariables["EVERYTHING_MCP_BACKEND"] = "sdk"
     $startInfo.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8"
     $startInfo.EnvironmentVariables["PYTHONUNBUFFERED"] = "1"
 
