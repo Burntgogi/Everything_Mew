@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from typing import NamedTuple
 
 from .query import is_absolute_scope, is_path_within_scope, is_root_scope, normalize_scope
 
@@ -38,8 +38,7 @@ def _enabled(value: str | None, name: str) -> bool:
     raise ValueError(f"{name} must be 0 or 1")
 
 
-@dataclass(frozen=True)
-class SearchPolicy:
+class SearchPolicy(NamedTuple):
     allowed_roots: tuple[str, ...] = ()
     allow_unscoped: bool = False
     allow_metadata: bool = False

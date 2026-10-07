@@ -8,7 +8,7 @@ from typing import Any
 from .adapters import EverythingAdapter, select_adapter
 from .contracts import BROAD_RESULT_THRESHOLD, HARD_LIMIT, SearchBatch, SortName, clamp_limit, path_first_items
 from .errors import BackendUnavailableError, EverythingMcpError
-from .query import is_safe_query
+from .query import is_safe_query, unknown_function_note
 from .policy import SearchPolicy
 from .syntax import syntax_help
 
@@ -19,8 +19,20 @@ TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
 
 
 def everything_status(adapter: EverythingAdapter | None = None) -> dict[str, Any]:
-    selected = adapter or select_adapter()
+    try:
+        selected = adapter or select_adapter()
+    except ValueError as exc:
+        return {"everythingRunning": False, "backend": "none", "notes": [str(exc)], **_failure("configuration_error", exc)}
     return selected.status().to_tool_result()
+
+
+def _failure(code: str, message: object) -> dict[str, Any]:
+    """Mark a payload as a failed tool call so transports publish isError=true."""
+    return {"error": {"code": code, "message": str(message)}}
+
+
+def _policy(policy: SearchPolicy | None) -> SearchPolicy:
+    return policy or SearchPolicy.from_env()
 
 
 def everything_count(
@@ -35,21 +47,30 @@ def everything_count(
             "tooBroad": True,
             "recommendation": "refine with a path, filename, extension, date, or size before searching",
         }
-    active_policy = policy or SearchPolicy.from_env()
-    denial = active_policy.denial_reason(scope)
-    if denial:
-        return {"count": None, "tooBroad": False, "denied": True, "recommendation": denial}
-    selected = adapter or select_adapter()
+    try:
+        active_policy = _policy(policy)
+        denial = active_policy.denial_reason(scope)
+        if denial:
+            return {"count": None, "tooBroad": False, "denied": True, "recommendation": denial, **_failure("denied", denial)}
+        selected = adapter or select_adapter()
+    except ValueError as exc:
+        return {"count": None, "tooBroad": False, "recommendation": str(exc), **_failure("configuration_error", exc)}
     try:
         count = selected.count(query=query, scope=scope)
+    except BackendUnavailableError as exc:
+        return {"count": None, "tooBroad": False, "recommendation": str(exc), **_failure("backend_unavailable", exc)}
     except EverythingMcpError as exc:
-        return {"count": None, "tooBroad": False, "recommendation": str(exc)}
+        return {"count": None, "tooBroad": False, "recommendation": str(exc), **_failure("query_failed", exc)}
     too_broad = count > BROAD_RESULT_THRESHOLD
-    return {
+    result: dict[str, Any] = {
         "count": count,
         "tooBroad": too_broad,
         "recommendation": "refine query before search" if too_broad else "search",
     }
+    hint = unknown_function_note(query) if count == 0 else None
+    if hint:
+        result["notes"] = [hint]
+    return result
 
 
 def everything_search(
@@ -70,20 +91,26 @@ def everything_search(
             "recommendation": "call everything_count after adding path, filename, extension, date, or size filters",
             "items": [],
         }
-    active_policy = policy or SearchPolicy.from_env()
-    denial = active_policy.denial_reason(scope, metadata)
-    if denial:
-        return {"countReturned": 0, "truncated": False, "denied": True, "recommendation": denial, "items": []}
-    selected = adapter or select_adapter()
+    empty: dict[str, Any] = {"countReturned": 0, "truncated": False}
+    try:
+        active_policy = _policy(policy)
+        denial = active_policy.denial_reason(scope, metadata)
+        if denial:
+            return {**empty, "denied": True, "recommendation": denial, "items": [], **_failure("denied", denial)}
+        selected = adapter or select_adapter()
+    except ValueError as exc:
+        return {**empty, "items": [], "notes": [str(exc)], **_failure("configuration_error", exc)}
     try:
         search_result = selected.search(query=query, scope=scope, limit=safe_limit + 1, sort=sort, metadata=metadata)
     except BackendUnavailableError as exc:
-        return {"countReturned": 0, "truncated": False, "items": [], "notes": [str(exc)]}
+        return {**empty, "items": [], "notes": [str(exc)], **_failure("backend_unavailable", exc)}
     except EverythingMcpError as exc:
-        return {"countReturned": 0, "truncated": False, "items": [], "notes": [str(exc), syntax_help()]}
+        return {**empty, "items": [], "notes": [str(exc), syntax_help()], **_failure("query_failed", exc)}
+    total_count: int | None = None
     if isinstance(search_result, SearchBatch):
         hits = list(search_result.hits)
         notes = search_result.notes
+        total_count = search_result.total_count
     else:
         hits = search_result
         notes = ()
@@ -95,8 +122,14 @@ def everything_search(
         "truncated": truncated,
         "items": path_first_items(visible, metadata),
     }
+    if total_count is not None:
+        # Everything's match count for the scoped query, from the same IPC reply.
+        result["totalCount"] = total_count
     if safe_limit == HARD_LIMIT and truncated:
         result["recommendation"] = "result hard cap reached; refine by path, filename, extension, date, or size"
+    hint = unknown_function_note(query) if not visible and not total_count else None
+    if hint:
+        notes = (*notes, hint)
     if notes:
         result["notes"] = list(notes)
     return result

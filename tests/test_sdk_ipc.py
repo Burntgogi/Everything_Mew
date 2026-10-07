@@ -409,7 +409,8 @@ def test_sdk_queries_reset_exactly_once_on_every_exit(operation: str, failure: s
         if operation == "count":
             assert result == 7
         else:
-            assert result == [SearchHit(path=r"C:\Work\everything_mcp\sample.py")]
+            assert result.hits == (SearchHit(path=r"C:\Work\everything_mcp\sample.py"),)
+            assert result.notes == ()
 
     assert dll.reset_calls == 1
 
@@ -481,7 +482,8 @@ def test_extra_unrequested_actual_flags_do_not_produce_warning() -> None:
 
     result = adapter.search("ext:py", scope=r"C:\Work")
 
-    assert result == [SearchHit(path=r"C:\Work\everything_mcp\sample.py")]
+    assert result.hits == (SearchHit(path=r"C:\Work\everything_mcp\sample.py"),)
+    assert result.notes == ()
 
 
 def test_zero_or_failed_full_path_copy_never_publishes_empty_path() -> None:
@@ -613,8 +615,8 @@ def test_sdk_actual_sort_and_metadata_match_produces_no_warning() -> None:
 
     result = adapter.search("ext:py", scope=r"C:\Work", sort="date_modified", metadata=True)
 
-    assert isinstance(result, list)
-    assert result[0].to_metadata_result() == {
+    assert result.notes == ()
+    assert result.hits[0].to_metadata_result() == {
         "path": r"C:\Work\everything_mcp\sample.py",
         "size": 123,
         "dateModified": "2025-01-01T00:00:00+00:00",

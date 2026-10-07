@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import ntpath
 import re
-from dataclasses import dataclass
 from pathlib import PureWindowsPath
-from typing import TypeAlias
+from typing import NamedTuple, TypeAlias
 
 POSITIVE_FILTER_PATTERN = re.compile(r"^(?:path:|ext:|dm:|dc:|rc:|size:)", re.IGNORECASE)
 DRIVE_ROOT_PATTERN = re.compile(r"^[a-z]:[\\/]*$", re.IGNORECASE)
@@ -89,6 +88,39 @@ PREFIX_MODIFIERS = frozenset(
     }
 )
 UNIVERSAL_WILDCARDS = frozenset({"*", "*.*"})
+# Name filters Everything always answers from its index without a substring scan.
+NAME_INDEX_FUNCTIONS = frozenset({"ext", "wfn", "wholefilename"})
+# Property filters that are only cheap when that property is indexed; otherwise
+# Everything reads the value from disk for every candidate. Keys are the
+# indexed-property names an adapter reports to compose_query.
+PROPERTY_INDEX_FUNCTIONS: dict[str, frozenset[str]] = {
+    "size": frozenset({"size"}),
+    "date_modified": frozenset({"dm", "datemodified"}),
+}
+TYPE_MODIFIERS = frozenset({"file", "files", "folder", "folders"})
+# Everything 1.4 search functions, modifiers, and default filter macros. Everything 1.4
+# matches any other "word:" prefix as literal text, which silently finds nothing.
+KNOWN_SEARCH_FUNCTIONS = (
+    frozenset(
+        {
+            "attrib", "attributes", "child", "childcount", "childfile", "childfolder",
+            "da", "dateaccessed", "dc", "datecreated", "dm", "datemodified", "dr", "daterun",
+            "depth", "parents", "dupe", "namepartdupe", "attribdupe", "dadupe", "dcdupe",
+            "dmdupe", "sizedupe", "empty", "endwith", "startwith", "ext", "filelist",
+            "filelistfilename", "frn", "fsi", "len", "parent", "infolder", "nosubfolders",
+            "rc", "recentchange", "root", "runcount", "shell", "size", "type", "path",
+            "audio", "zip", "doc", "exe", "pic", "video",
+        }
+    )
+    | CONTENT_FUNCTIONS
+    | NARROWING_FUNCTIONS
+    | PREFIX_MODIFIERS
+    | FORCED_DISK_MODIFIERS
+    | REGEX_FUNCTIONS
+    | WILDCARD_FUNCTIONS
+    | TYPE_MODIFIERS
+)
+EXTENSION_WILDCARD_PATTERN =re.compile(r"\*\.[^*?.\s]+")
 MAX_QUERY_TOKENS = 256
 MAX_QUERY_BRANCHES = 128
 
@@ -97,43 +129,36 @@ class QuerySyntaxError(ValueError):
     """Raised internally when a query cannot be analysed safely."""
 
 
-@dataclass(frozen=True)
-class _Token:
+class _Token(NamedTuple):
     kind: str
     value: str = ""
 
 
-@dataclass(frozen=True)
-class _TermNode:
+class _TermNode(NamedTuple):
     value: str
 
 
-@dataclass(frozen=True)
-class _AndNode:
+class _AndNode(NamedTuple):
     children: tuple["_QueryNode", ...]
 
 
-@dataclass(frozen=True)
-class _OrNode:
+class _OrNode(NamedTuple):
     children: tuple["_QueryNode", ...]
 
 
-@dataclass(frozen=True)
-class _NotNode:
+class _NotNode(NamedTuple):
     child: "_QueryNode"
 
 
 _QueryNode: TypeAlias = _TermNode | _AndNode | _OrNode | _NotNode
 
 
-@dataclass(frozen=True)
-class _Literal:
+class _Literal(NamedTuple):
     value: str
     negated: bool
 
 
-@dataclass(frozen=True)
-class _TermInfo:
+class _TermInfo(NamedTuple):
     valid: bool
     meaningful: bool
     narrowing_filter: bool
@@ -146,7 +171,7 @@ class _TermInfo:
     pattern_modifier: bool
 
 
-def compose_query(query: str, scope: str | None = None) -> str:
+def compose_query(query: str, scope: str | None = None, indexed_properties: frozenset[str] = frozenset()) -> str:
     text = query.strip()
     if not scope or not scope.strip():
         return text
@@ -154,9 +179,109 @@ def compose_query(query: str, scope: str | None = None) -> str:
     if not is_absolute_scope(normalized_scope):
         raise QuerySyntaxError("scope must be an absolute Windows drive or UNC path")
     recursive_scope = normalized_scope if normalized_scope.endswith("\\") else f"{normalized_scope}\\"
+    scope_term = quote_everything_phrase(recursive_scope)
     # Group the caller's entire expression so OR precedence cannot detach a
     # branch from the trusted scope term (including non-default Everything settings).
-    return f"{quote_everything_phrase(recursive_scope)} <{text}>".strip()
+    # Everything evaluates AND operands left to right, and the scope is a
+    # full-path substring match. Let an anchored, indexed filter run first when
+    # the expression starts with one; otherwise the scope is the cheaper prefilter.
+    if leads_with_indexed_filter(text, indexed_properties):
+        return f"<{text}> {scope_term}"
+    return f"{scope_term} <{text}>".strip()
+
+
+def leads_with_indexed_filter(query: str, indexed_properties: frozenset[str] = frozenset()) -> bool:
+    """Return whether the scope may follow the query without widening disk or substring work.
+
+    The first AND operand must be an anchored filter on indexed data, and no
+    term may read from disk: a content or from-disk term placed before the
+    scope would read every matching file in the whole index.
+    """
+    try:
+        tokens = _tokenize(query.strip())
+        node = _QueryParser(tokens).parse()
+    except QuerySyntaxError:
+        return False
+    if any(token.kind == "TERM" and _reads_disk(token.value) for token in tokens):
+        return False
+    cheap_functions = NAME_INDEX_FUNCTIONS.union(
+        *(functions for name, functions in PROPERTY_INDEX_FUNCTIONS.items() if name in indexed_properties)
+    )
+    return _is_cheap_leading_node(node, cheap_functions)
+
+
+def _reads_disk(raw: str) -> bool:
+    return _term_contains_function(raw, CONTENT_FUNCTIONS | FORCED_DISK_MODIFIERS) or _analyse_term(raw).content_search
+
+
+def _is_cheap_leading_node(node: "_QueryNode", cheap_functions: frozenset[str]) -> bool:
+    if isinstance(node, _TermNode):
+        return _is_cheap_term(node.value, cheap_functions)
+    if isinstance(node, _NotNode):
+        return _is_cheap_leading_node(node.child, cheap_functions)
+    if isinstance(node, _AndNode):
+        return _is_cheap_leading_node(node.children[0], cheap_functions)
+    return all(_is_cheap_leading_node(child, cheap_functions) for child in node.children)
+
+
+def _is_cheap_term(raw: str, cheap_functions: frozenset[str]) -> bool:
+    text = raw.strip()
+    while True:
+        name, separator, value = text.partition(":")
+        if not separator or not FUNCTION_CHAIN_IDENTIFIER_PATTERN.fullmatch(name):
+            break
+        function = _canonical_identifier(name)
+        if function in TYPE_MODIFIERS:
+            if not value.strip():
+                return True
+            text = value
+            continue
+        return function in cheap_functions and bool(value.strip())
+    pattern = _unquote_phrase(text)
+    if "\\" in pattern or "/" in pattern or not ("*" in pattern or "?" in pattern):
+        # Plain words are unanchored substring scans; path patterns match full paths.
+        return False
+    # Anchored wildcards (lite*) and extension wildcards (*.py) are checked against
+    # the indexed name; other leading wildcards (*lite*) scan like substrings.
+    return pattern[0] not in "*?" or bool(EXTENSION_WILDCARD_PATTERN.fullmatch(pattern))
+
+
+def unknown_search_functions(query: str) -> tuple[str, ...]:
+    """Return "word:" prefixes that Everything 1.4 does not define (it searches them as text)."""
+    try:
+        tokens = _tokenize(query.strip())
+    except QuerySyntaxError:
+        return ()
+    unknown: list[str] = []
+    for token in tokens:
+        if token.kind != "TERM":
+            continue
+        text = token.value
+        while True:
+            name, separator, value = text.partition(":")
+            if not separator or not FUNCTION_CHAIN_IDENTIFIER_PATTERN.fullmatch(name):
+                break
+            if len(name) == 1 and value[:1] in ("\\", "/"):
+                break  # a drive path such as C:\Work
+            if _canonical_identifier(name) not in KNOWN_SEARCH_FUNCTIONS:
+                if name not in unknown:
+                    unknown.append(name)
+                break
+            text = value
+    return tuple(unknown)
+
+
+def unknown_function_note(query: str) -> str | None:
+    """Explain an empty result that was caused by a search function Everything 1.4 lacks."""
+    unknown = unknown_search_functions(query)
+    if not unknown:
+        return None
+    names = ", ".join(f"{name}:" for name in unknown)
+    return (
+        f"No matches: {names} is not an Everything 1.4 search function, so it was searched as literal text. "
+        "Use wfn:NAME for an exact file name, NAME* for a prefix, or plain text for name-contains; "
+        "call everything_syntax_help for more."
+    )
 
 
 def quote_everything_phrase(value: str) -> str:

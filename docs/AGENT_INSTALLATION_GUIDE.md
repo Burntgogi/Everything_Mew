@@ -36,12 +36,15 @@ official voidtools Everything SDK over local IPC.
 
 ## Install The Runtime
 
-Install the current `main` source for the unreleased allowed-root policy and
-its path validation fixes. The stable `v0.3.0` tag does not enforce these
+Install version 0.4.0 or later. It is the first release that enforces the
+allowed-root policy and its path validation fixes; version 0.3.0 ignores these
 settings. For a fresh checkout, use the
-[source installation](../README.md#2-install-the-source-revision-with-allowed-root-controls).
-The package version remains `0.3.0`; verify the installed policy below before
-enabling a host.
+[installation steps](../README.md#2-install-version-040-or-later). Verify the
+installed policy below before enabling a host.
+
+Since 0.4.0, the default `native-ipc` backend needs no Everything SDK DLL.
+Do the SDK DLL steps in this guide only when you select the SDK backend with
+`EVERYTHING_MCP_BACKEND=sdk`.
 
 From the repository root, create the intended virtual environment, resolve its
 Python executable once, and install the dependency-free runtime. FastMCP and

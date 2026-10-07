@@ -5,7 +5,6 @@ import json
 import sys
 import tomllib
 from collections.abc import MutableMapping
-from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -182,7 +181,9 @@ def test_opencode_mcp_examples_follow_official_local_schema() -> None:
     ):
         source = (repository_root / relative_path).read_text(encoding="utf-8")
         sdk_environment_lines = [line for line in source.splitlines() if '"EVERYTHING_SDK_DLL"' in line]
-        assert sdk_environment_lines
+        # Since native IPC, only the guides that cover the optional SDK backend must show the DLL.
+        if relative_path.startswith("docs/"):
+            assert sdk_environment_lines
         assert all("{env:EVERYTHING_SDK_DLL}" in line for line in sdk_environment_lines)
         assert all("%USERPROFILE%" not in line for line in sdk_environment_lines)
 
@@ -293,7 +294,7 @@ def test_lite_stdio_tool_specs_are_shared_and_immutable() -> None:
     tool_specs = importlib.import_module("everything_mcp.tool_specs")
     search_spec = tool_specs.TOOL_SPEC_BY_NAME["everything_search"]
 
-    with pytest.raises(FrozenInstanceError):
+    with pytest.raises(AttributeError):
         setattr(search_spec, "name", "changed")
     with pytest.raises(TypeError):
         cast(MutableMapping[str, Any], search_spec.properties)["extra"] = object()
@@ -331,6 +332,8 @@ def test_lite_stdio_supports_current_and_previous_protocol_versions() -> None:
                     "Everything_Mew is a read-only Windows file and folder discovery server backed by Everything. "
                     "Pass a scope inside host-configured allowed roots to search or count, then add "
                     "path/extension/date/size filters for large result sets. "
+                    "everything_search also reports totalCount, so a separate count is rarely needed; "
+                    "lead with ext:, size:, or dm: filters for the fastest queries. "
                     "Use normal filesystem tools to read or modify files after locating paths."
                 ),
             },

@@ -53,6 +53,7 @@ MWMO_INPUTAVAILABLE = 0x0004
 WAIT_TIMEOUT = 0x00000102
 WAIT_FAILED = 0xFFFFFFFF
 HWND_MESSAGE = -3
+MSGFLT_ALLOW = 1
 TARGET_MACHINES: dict[int, TargetMachineName] = {1: "x86", 2: "x64", 3: "ARM", 4: "ARM64"}
 REQUEST_FLAG_NAMES = (
     (REQUEST_FULL_PATH, "fullPath"),
@@ -190,6 +191,8 @@ class _Win32QueryReplyWindow:
             raise OSError("Could not create the Everything SDK reply window.")
         self.hwnd = int(hwnd)
         self._window_destroyed = False
+        # Match the SDK's own reply window so a lower-integrity Everything can reply to an elevated caller.
+        self._user32.ChangeWindowMessageFilterEx(self.hwnd, WM_COPYDATA, MSGFLT_ALLOW, None)
 
     def _configure_win32(self) -> None:
         self._kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
@@ -237,6 +240,8 @@ class _Win32QueryReplyWindow:
         self._user32.DestroyWindow.restype = wintypes.BOOL
         self._user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
         self._user32.UnregisterClassW.restype = wintypes.BOOL
+        self._user32.ChangeWindowMessageFilterEx.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.DWORD, wintypes.LPVOID]
+        self._user32.ChangeWindowMessageFilterEx.restype = wintypes.BOOL
 
     def _handle_message(self, hwnd: int, message: int, w_param: int, l_param: int) -> int:
         if message == WM_COPYDATA:
@@ -462,13 +467,13 @@ class SdkIpcAdapter:
         limit: int = 25,
         sort: SortName = "name",
         metadata: bool = False,
-    ) -> list[SearchHit] | SearchBatch:
+    ) -> SearchBatch:
         self._ensure_ready()
         dll = self._ready_dll()
         requested_sort = _sort_flag(sort)
         requested_flags = METADATA_FLAGS if metadata else PATH_ONLY_FLAGS
 
-        def operation() -> list[SearchHit] | SearchBatch:
+        def operation() -> SearchBatch:
             self._set_query(query, scope)
             dll.Everything_SetSort(requested_sort)
             dll.Everything_SetRequestFlags(requested_flags)
@@ -484,7 +489,8 @@ class SdkIpcAdapter:
                 hits.append(hit)
                 unavailable_fields.update(unavailable)
             note = _result_diagnostic_note(requested_sort, actual_sort, unavailable_fields)
-            return SearchBatch(hits=tuple(hits), notes=(note,)) if note is not None else hits
+            total = int(dll.Everything_GetTotResults())
+            return SearchBatch(hits=tuple(hits), notes=(note,) if note is not None else (), total_count=total)
 
         return self._run_with_reset("search", operation)
 
@@ -603,7 +609,8 @@ class SdkIpcAdapter:
         buffer = ctypes.create_unicode_buffer(required + 1)
         copied = int(dll.Everything_GetResultFullPathNameW(index, buffer, required + 1))
         path = buffer.value
-        if copied != required or len(path) != required:
+        # The SDK counts UTF-16 code units; non-BMP characters such as emoji use two.
+        if copied != required or _utf16_length(path) != required:
             raise QueryError(
                 f"Everything SDK result {index} changed while copying its full path; retry the query."
             )
@@ -678,6 +685,10 @@ class SdkIpcAdapter:
     def _result_attributes(self, index: int) -> str | None:
         value = int(self._ready_dll().Everything_GetResultAttributes(index)) & 0xFFFFFFFF
         return None if value == INVALID_FILE_ATTRIBUTES else f"0x{value:08X}"
+
+
+def _utf16_length(value: str) -> int:
+    return len(value.encode("utf-16-le", "surrogatepass")) // 2
 
 
 def _sort_flag(sort: SortName) -> int:

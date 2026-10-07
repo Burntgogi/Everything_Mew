@@ -27,8 +27,9 @@ submitting the report.
 
 | Release | Status |
 | --- | --- |
-| `0.3.x` | Current supported / 현재 지원 |
-| `0.2.x` | Supported previous line / 이전 계열 지원 |
+| `0.4.x` | Current supported / 현재 지원 |
+| `0.3.x` | Supported previous line, without allowed-root enforcement / 이전 계열 지원, 허용 경로 정책 미적용 |
+| `0.2.x` | Unsupported; upgrade to `0.4.x` / 지원 종료, `0.4.x`로 업그레이드 |
 
 Everything_Mew supports CPython 3.11 through 3.14 on Windows. Reports against
 unsupported Python versions or non-Windows hosts may still be useful, but they
@@ -48,3 +49,30 @@ or local evidence in release artifacts.
 보안 검토 범위에는 읽기 전용 쿼리 경계, JSON-RPC 입력 검증, 의도하지 않은
 경로/예외 노출, 실행 파일 및 DLL 경로 처리, 의존성과 빌드 무결성, 배포 산출물에
 비밀 정보나 로컬 검증 자료가 포함되는 문제가 있습니다.
+
+## Known trust limits / 알려진 신뢰 한계
+
+These limits are part of the design and are not vulnerabilities by
+themselves. Report a way to cross them, such as reading outside the allowed
+roots.
+
+- Any program that runs as the same Windows user can register the Everything
+  IPC window class, read queries, and return false results. The SDK DLL and
+  `es.exe` share this limit. Allowed roots still filter every returned path.
+- File names are attacker-controlled text. Agents must treat returned paths as
+  data, not instructions.
+- When the agent is elevated and Everything is not, the reply window accepts
+  `WM_COPYDATA` from a lower integrity level. Native IPC replies need a random
+  32-bit reply ID.
+
+다음 한계는 설계의 일부이며 그 자체로는 취약점이 아닙니다. 허용 경로 밖을
+읽는 것처럼 이 한계를 넘는 방법을 신고하세요.
+
+- 같은 Windows 사용자로 실행되는 프로그램은 Everything IPC 창 클래스를 등록해
+  쿼리를 읽고 거짓 결과를 돌려줄 수 있습니다. SDK DLL과 `es.exe`도 같습니다.
+  허용 경로는 이 경우에도 반환되는 모든 경로를 거릅니다.
+- 파일 이름은 공격자가 정할 수 있는 텍스트입니다. 에이전트는 반환된 경로를
+  지시가 아닌 데이터로 취급해야 합니다.
+- 에이전트가 관리자 권한이고 Everything이 아니면, 응답 창은 낮은 무결성
+  수준의 `WM_COPYDATA`를 받습니다. 네이티브 IPC 응답에는 무작위 32비트 응답
+  ID가 필요합니다.

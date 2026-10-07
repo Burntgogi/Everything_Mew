@@ -34,12 +34,14 @@ The MCP is SDK-first. `es.exe` is only a fallback when SDK/IPC is unavailable.
 
 ## Recommended Install Strategy
 
-Install the current `main` source for the unreleased allowed-root policy and
-its path validation fixes. The stable `v0.3.0` tag does not enforce these
-settings. Follow the
-[source installation](../README.md#2-install-the-source-revision-with-allowed-root-controls)
-for a fresh checkout, and verify the installed policy below. The package
-version remains `0.3.0`, so checking that number alone is insufficient.
+Install version 0.4.0 or later. It is the first release that enforces the
+allowed-root policy and its path validation fixes; version 0.3.0 ignores these
+settings. Follow the [installation steps](../README.md#2-install-version-040-or-later)
+for a fresh checkout, and verify the installed policy below.
+
+Since 0.4.0, the default `native-ipc` backend needs no Everything SDK DLL.
+Use this guide only when you select the SDK backend with
+`EVERYTHING_MCP_BACKEND=sdk`.
 
 Create a project-local environment and install the dependency-free runtime.
 Codex should use the one-shot command; always-enabled OpenCode or manual MCP

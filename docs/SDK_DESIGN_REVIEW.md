@@ -2,6 +2,12 @@
 
 Review date: 2026-07-15
 
+> Historical record. Since the 2026-10 lifecycle and native IPC audit, the
+> primary backend speaks the Everything IPC protocol directly without the SDK
+> DLL, and the lite server runs tool calls in short-lived workers. See
+> [the 2026-10 audit](AUDIT_2026-10_LIFECYCLE_NATIVE_IPC.md) for the current
+> design.
+
 ## Executive Finding
 
 The project should keep its current backend strategy:
