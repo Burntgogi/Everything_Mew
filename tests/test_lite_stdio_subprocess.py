@@ -26,6 +26,38 @@ def powershell_path() -> str:
     return powershell
 
 
+def run_powershell_probe(
+    body: str, *, env: dict[str, str], timeout: int = 10
+) -> subprocess.CompletedProcess[str]:
+    # A cold hosted Windows shell has a separate startup budget. The probe's
+    # execution budget still starts at readiness and remains bounded.
+    ready_marker = "measurement-probe-ready"
+    command = f"[Console]::Out.WriteLine('{ready_marker}'); [Console]::Out.Flush();\n" + body
+    args = [powershell_path(), "-NoProfile", "-NonInteractive", "-Command", command]
+    with ThreadPoolExecutor(max_workers=1) as reader:
+        with subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", env=env,
+        ) as process:
+            assert process.stdout is not None
+            ready = reader.submit(process.stdout.readline)
+            try:
+                first_line = ready.result(timeout=30)
+            except TimeoutError:
+                process.kill()
+                first_line = ready.result(timeout=5)
+                stdout, stderr = process.communicate(timeout=5)
+                raise subprocess.TimeoutExpired(args, 30, first_line + stdout, stderr) from None
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+                raise
+            assert first_line.strip() == ready_marker, (first_line, stderr)
+            return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
 def run_measurement_function_probe(
     functions: list[str],
     body: str,
@@ -62,15 +94,7 @@ foreach ($functionName in @($env:TASK7_FUNCTIONS -split ',')) {
     env["TASK7_FUNCTIONS"] = ",".join(functions)
     if extra_env:
         env.update(extra_env)
-    return subprocess.run(
-        [powershell_path(), "-NoProfile", "-NonInteractive", "-Command", loader + body],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=env,
-        timeout=timeout,
-        check=False,
-    )
+    return run_powershell_probe(loader + body, env=env, timeout=timeout)
 
 
 def measurement_function_source(name: str) -> str:
@@ -561,15 +585,7 @@ foreach ($parameter in $ast.ParamBlock.Parameters) {
 """
     env = os.environ.copy()
     env["TASK7_MEASUREMENT_SCRIPT"] = str(MEASUREMENT_SCRIPT)
-    completed = subprocess.run(
-        [powershell_path(), "-NoProfile", "-NonInteractive", "-Command", probe],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=env,
-        timeout=10,
-        check=False,
-    )
+    completed = run_powershell_probe(probe, env=env)
 
     assert completed.returncode == 0, completed.stderr
     metadata = json.loads(completed.stdout)
@@ -624,41 +640,29 @@ def test_measurement_script_resolves_default_repo_before_clear_sdk_preflight_fai
     assert "PSScriptRoot" not in output
 
 
-def test_measurement_script_uses_one_absolute_deadline_across_notifications(tmp_path: Path) -> None:
-    helper = tmp_path / "delayed_protocol.py"
-    helper.write_text(
-        """\
-import json
-import time
-
-for index in range(8):
-    print(json.dumps({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"index": index}}), flush=True)
-    time.sleep(0.2)
-print(json.dumps({"jsonrpc": "2.0", "id": "expected", "result": {}}), flush=True)
-""",
-        encoding="utf-8",
-    )
+def test_measurement_script_uses_one_absolute_deadline_across_notifications() -> None:
+    # Advance the remaining budget deterministically. Host scheduling and child
+    # process startup must not decide whether the same deadline was reused.
     body = r"""
-$startInfo = New-Object System.Diagnostics.ProcessStartInfo
-$startInfo.FileName = $env:TASK7_PYTHON
-$startInfo.Arguments = '"' + $env:TASK7_PROTOCOL_HELPER + '"'
-$startInfo.WorkingDirectory = $env:TASK7_REPO_ROOT
-$startInfo.UseShellExecute = $false
-$startInfo.CreateNoWindow = $true
-$startInfo.RedirectStandardInput = $true
-$startInfo.RedirectStandardOutput = $true
-$startInfo.RedirectStandardError = $true
-$process = New-Object System.Diagnostics.Process
-$process.StartInfo = $startInfo
-$null = $process.Start()
+$script:deadlines = New-Object System.Collections.ArrayList
+$script:budgets = @(1000, 800, 400, 0)
+function Get-RemainingMilliseconds {
+    param([DateTime]$Deadline)
+    $index = $script:deadlines.Add($Deadline.Ticks)
+    if ($index -ge $script:budgets.Count) { throw 'Unexpected extra deadline check' }
+    return $script:budgets[$index]
+}
+$notification = '{"jsonrpc":"2.0","method":"notifications/progress","params":{}}'
+$response = '{"jsonrpc":"2.0","id":"expected","result":{}}'
+$lines = (@($notification, $notification, $notification, $response) -join "`n") + "`n"
+$reader = New-Object System.IO.StringReader($lines)
 $session = [pscustomobject]@{
     Backend = 'deadline-test'
     Index = 1
-    Process = $process
+    Process = [pscustomobject]@{ StandardOutput = $reader }
     Notifications = New-Object System.Collections.ArrayList
-    SeenIds = New-Object 'System.Collections.Generic.HashSet[string]'
+    SeenIds = @{}
 }
-$watch = [System.Diagnostics.Stopwatch]::StartNew()
 $timedOut = $false
 try {
     $null = Receive-MatchingResponse -Session $session -ExpectedId 'expected' -TimeoutSeconds 1
@@ -666,36 +670,27 @@ try {
 catch {
     $timedOut = $_.Exception.Message -like '*Timed out waiting*'
 }
-finally {
-    $watch.Stop()
-    if (-not $process.HasExited) {
-        $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
-        & $taskkill /PID $process.Id /T /F *> $null
-        $null = $process.WaitForExit(5000)
-    }
-}
 [pscustomobject]@{
     timedOut = $timedOut
-    elapsedMilliseconds = $watch.ElapsedMilliseconds
     notifications = $session.Notifications.Count
+    deadlines = @($script:deadlines)
+    unread = $reader.ReadLine()
 } | ConvertTo-Json -Compress
+$reader.Dispose()
 """
     completed = run_measurement_function_probe(
-        ["Test-ObjectProperty", "Assert-ValidNotification", "Get-RemainingMilliseconds", "Receive-MatchingResponse"],
+        ["Test-ObjectProperty", "Assert-ValidNotification", "Receive-MatchingResponse"],
         body,
-        extra_env={
-            "TASK7_PYTHON": sys.executable,
-            "TASK7_PROTOCOL_HELPER": str(helper),
-            "TASK7_REPO_ROOT": str(ROOT),
-        },
         timeout=8,
     )
 
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
     assert result["timedOut"] is True
-    assert 700 <= result["elapsedMilliseconds"] < 1800
-    assert result["notifications"] >= 3
+    assert result["notifications"] == 3
+    assert len(result["deadlines"]) == 4
+    assert len(set(result["deadlines"])) == 1
+    assert json.loads(result["unread"])["id"] == "expected"
 
 
 def test_measurement_script_rejects_malformed_notifications() -> None:
